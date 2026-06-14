@@ -1,0 +1,11 @@
+# Wiki Craft configuration.
+
+[runtime]
+root = ".wiki_craft"
+
+[search]
+embedding_enabled = false
+ollama_endpoint = "http://127.0.0.1:11434"
+embedding_model = "bge-m3"
+embedding_dimensions = 1024
+embedding_timeout_seconds = 10

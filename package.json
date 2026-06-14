@@ -1,0 +1,22 @@
+{
+  "name": "wiki-craft-ts",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "dev:backend": "node backend/src/server.ts",
+    "wiki-craft": "node backend/src/cli.ts",
+    "cli": "node backend/src/cli.ts",
+    "build": "npm run build:backend && npm --prefix frontend run build",
+    "build:backend": "node --check backend/src/cli.ts && node --check backend/src/server.ts && node --check backend/src/runtime.ts && node --check backend/src/search.ts && node --check backend/src/config.ts && node --test backend/test/*.test.ts",
+    "test:backend": "node --test backend/test/*.test.ts",
+    "tauri": "node frontend/node_modules/@tauri-apps/cli/tauri.js",
+    "tauri:dev": "node frontend/node_modules/@tauri-apps/cli/tauri.js dev --config src-tauri/tauri.conf.json",
+    "frontend:build": "npm --prefix frontend run build"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "typescript": "^6.0.3"
+  }
+}
