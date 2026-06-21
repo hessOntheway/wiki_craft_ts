@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
-import { activateKnowledgeBase, createKnowledgeBase, deleteKnowledgeBase, initializeProject, listKnowledgeBases } from "../src/config.ts";
+import { activateKnowledgeBase, createKnowledgeBase, deleteKnowledgeBase, initializeProject, listKnowledgeBases, loadGlobalConfig } from "../src/config.ts";
 import { createSkill, extractWikilinks, importLocalFile, parseVaultFrontmatter } from "../src/runtime.ts";
 import { reindexConfigured, searchConfigured } from "../src/search.ts";
 import { routeForTest } from "../src/server.ts";
@@ -204,4 +204,39 @@ test("search index persists embeddings in sqlite and lexical-only clears them", 
   }
   const lexical = await reindexConfigured(configPath, kb.id, true);
   assert.equal(lexical.embedded_chunks, 0);
+});
+
+test("embedding provider defaults to none without requiring a local service", async () => {
+  const { configPath } = await fixture();
+  const config = await loadGlobalConfig(configPath);
+  assert.equal(config.search.embedding_provider, "none");
+  assert.equal(config.search.embedding_enabled, false);
+});
+
+test("openai-compatible embedding provider indexes vectors", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "wiki-craft-openai-embed-"));
+  const configPath = path.join(root, "wiki_craft.toml");
+  await fs.writeFile(configPath, `[runtime]\nroot = ".wiki_craft"\n\n[search]\nembedding_provider = "openai_compatible"\nembedding_endpoint = "http://embeddings.test/openai/v1"\nembedding_api_key = "test-key"\nembedding_model = "embedding-v1"\nembedding_dimensions = 3\nembedding_timeout_seconds = 1\n`);
+  const kb = await createKnowledgeBase(configPath, { name: "Hosted Vectors", focus: "hosted vectors" });
+  await fs.writeFile(path.join(kb.root, "knowledge", "approved", "topics", "hosted.md"), "---\ntitle: \"Hosted Embeddings\"\ntags: [vectors]\n---\n\n# Hosted Embeddings\n\nRemote OpenAI compatible embedding APIs.");
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; authorization?: string | null }> = [];
+  globalThis.fetch = (async (input, init) => {
+    calls.push({
+      url: String(input),
+      authorization: init?.headers instanceof Headers
+        ? init.headers.get("Authorization")
+        : (init?.headers as Record<string, string> | undefined)?.Authorization,
+    });
+    return new Response(JSON.stringify({ data: [{ embedding: [1, 0, 0] }] }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    const response = await searchConfigured(configPath, kb.id, "hosted embeddings", 5);
+    assert.ok(response.results.length > 0);
+    assert.equal(response.index_status.embedding_signature, "openai_compatible:embedding-v1:3");
+    assert.equal(calls[0]?.url, "http://embeddings.test/openai/v1/embeddings");
+    assert.equal(calls[0]?.authorization, "Bearer test-key");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

@@ -1,4 +1,5 @@
 export type RetrievalMode = "hybrid" | "bm25" | "graph_hybrid";
+export type EmbeddingProvider = "none" | "ollama" | "openai_compatible";
 
 export interface KnowledgeBaseRecord {
   id: string;
@@ -51,6 +52,9 @@ export interface AppConfig {
   runtime: { root: string };
   search: {
     embedding_enabled: boolean;
+    embedding_provider: EmbeddingProvider;
+    embedding_endpoint: string;
+    embedding_api_key?: string | null;
     ollama_endpoint: string;
     embedding_model: string;
     embedding_dimensions: number;

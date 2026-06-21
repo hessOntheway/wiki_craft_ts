@@ -7,7 +7,7 @@ Wiki Craft TS is a TypeScript/Tauri desktop and CLI project for searching approv
 ## What It Does
 
 - Keeps multiple named knowledge bases under `.wiki_craft/knowledge_bases/`.
-- Searches approved Markdown with SQLite FTS5 BM25 and optional Ollama embeddings.
+- Searches approved Markdown with SQLite FTS5 BM25, graph metadata, and optional embeddings.
 - Imports local files directly into approved evidence.
 - Generates Codex/Claude/custom skills that call the Wiki Craft CLI search command.
 - Runs as a single desktop app with search as the primary screen and lightweight management in the sidebar.
@@ -22,7 +22,7 @@ backend/src/
   server.ts     single local HTTP API
   config.ts     wiki_craft.toml, registry, knowledge-base config, paths
   runtime.ts    local import, skill export, Markdown frontmatter helpers
-  search.ts     approved-vault search, SQLite FTS5, Ollama embeddings
+  search.ts     approved-vault search, SQLite FTS5, optional embeddings
   types.ts      shared public contracts
   util.ts       filesystem, hashing, path, TOML, and Markdown helpers
 
@@ -102,7 +102,28 @@ Set `WIKI_CRAFT_CONFIG=/path/to/wiki_craft.toml` to switch workspaces. Set `WIKI
 
 ## Embeddings
 
-Embeddings are disabled by default, so search works with BM25 and graph metadata without requiring Ollama. To enable hybrid vector search, set `embedding_enabled = true`, make the configured Ollama embedding model available, then run:
+Embeddings are disabled by default, so search works with BM25 and graph metadata without requiring a local model service. To enable hybrid vector search, choose a provider and then run:
+
+```toml
+[search]
+embedding_provider = "ollama"
+ollama_endpoint = "http://127.0.0.1:11434"
+embedding_model = "bge-m3"
+embedding_dimensions = 1024
+```
+
+For hosted or self-hosted OpenAI-compatible embedding APIs:
+
+```toml
+[search]
+embedding_provider = "openai_compatible"
+embedding_endpoint = "https://example.com/openai/v1"
+embedding_api_key = "..."
+embedding_model = "embedding-v1"
+embedding_dimensions = 1024
+```
+
+The legacy `embedding_enabled = true` setting still enables the Ollama provider when `embedding_provider` is omitted.
 
 ```bash
 npm run wiki-craft -- reindex --knowledge-base <knowledge_base_id>

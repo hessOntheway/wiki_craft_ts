@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import * as fssync from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { RetrievalMode } from "./types.ts";
+import type { AppConfig, RetrievalMode } from "./types.ts";
 import { loadConfigForKnowledgeBase, listKnowledgeBases, workspacePaths } from "./config.ts";
 import { extractWikilinks, parseVaultFrontmatter } from "./runtime.ts";
 import { ensureDir, listFiles, normalizeWhitespace, pathExists, readJson, relPosix, sha256Hex, truncateChars, writeJson } from "./util.ts";
@@ -119,7 +119,7 @@ export async function searchConfigured(configPath: string, knowledgeBaseId: stri
   let retrievalMode: RetrievalMode = "bm25";
   let warning = cache.embedding_warning ?? null;
   const lexicalHits = await lexical;
-  const vector = config.search.embedding_enabled && cache.chunks.some((chunk) => chunk.embedding)
+  const vector = embeddingsEnabled(config.search) && cache.chunks.some((chunk) => chunk.embedding)
     ? await vectorHits(trimmed, cache, config.search).catch((error) => {
       warning = String(error instanceof Error ? error.message : error);
       return [];
@@ -315,16 +315,17 @@ async function refreshIndex(
   sqlitePath: string,
   cachePath: string,
   chunks: SearchChunk[],
-  settings: { embedding_enabled: boolean; ollama_endpoint: string; embedding_model: string; embedding_dimensions: number; embedding_timeout_seconds: number },
+  settings: AppConfig["search"],
   lexicalOnly: boolean,
   force: boolean,
 ): Promise<SearchIndexCache> {
   const fingerprint = sha256Hex(JSON.stringify(chunks.map((chunk) => [chunk.id, sha256Hex(chunk.body)])));
   syncSqliteIndex(sqlitePath, chunks, fingerprint, force);
-  const signature = settings.embedding_enabled ? embeddingSignature(settings) : null;
-  if (lexicalOnly || !settings.embedding_enabled) clearSqliteEmbeddings(sqlitePath);
+  const enabled = embeddingsEnabled(settings);
+  const signature = enabled ? embeddingSignature(settings) : null;
+  if (lexicalOnly || !enabled) clearSqliteEmbeddings(sqlitePath);
   let warning: string | null = null;
-  if (settings.embedding_enabled && !lexicalOnly) {
+  if (enabled && !lexicalOnly) {
     for (const chunk of chunks) {
       const state = sqliteEmbeddingState(sqlitePath, chunk.id);
       if (state.embedding && state.embedding_signature === signature) continue;
@@ -628,7 +629,7 @@ INSERT INTO search_chunks_fts(rowid, title, aliases, tags, wikilinks, heading, b
   }
 }
 
-async function vectorHits(query: string, cache: SearchIndexCache, settings: { ollama_endpoint: string; embedding_model: string; embedding_timeout_seconds: number }): Promise<Array<{ id: string; score: number }>> {
+async function vectorHits(query: string, cache: SearchIndexCache, settings: AppConfig["search"]): Promise<Array<{ id: string; score: number }>> {
   const queryEmbedding = await embed(query, settings);
   return cache.chunks.filter((chunk) => chunk.embedding).map((chunk) => ({
     id: chunk.id,
@@ -728,11 +729,21 @@ function embeddableText(chunk: SearchChunk): string {
   return [chunk.title, chunk.aliases.join(" "), chunk.tags.join(" "), chunk.heading, chunk.body].filter(Boolean).join("\n");
 }
 
-function embeddingSignature(settings: { embedding_model: string; embedding_dimensions: number }): string {
-  return `ollama:${settings.embedding_model}:${settings.embedding_dimensions}`;
+function embeddingsEnabled(settings: AppConfig["search"]): boolean {
+  return settings.embedding_provider !== "none";
 }
 
-async function embed(text: string, settings: { ollama_endpoint: string; embedding_model: string; embedding_timeout_seconds: number }): Promise<number[]> {
+function embeddingSignature(settings: AppConfig["search"]): string {
+  return `${settings.embedding_provider}:${settings.embedding_model}:${settings.embedding_dimensions}`;
+}
+
+async function embed(text: string, settings: AppConfig["search"]): Promise<number[]> {
+  if (settings.embedding_provider === "ollama") return embedWithOllama(text, settings);
+  if (settings.embedding_provider === "openai_compatible") return embedWithOpenAiCompatible(text, settings);
+  throw new Error("embedding provider is disabled");
+}
+
+async function embedWithOllama(text: string, settings: AppConfig["search"]): Promise<number[]> {
   const response = await fetch(`${settings.ollama_endpoint.replace(/\/+$/u, "")}/api/embed`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -742,6 +753,26 @@ async function embed(text: string, settings: { ollama_endpoint: string; embeddin
   if (!response.ok) throw new Error(`embedding api error (${response.status})`);
   const payload = await response.json() as { embeddings?: number[][] };
   const embedding = payload.embeddings?.[0];
+  if (!embedding) throw new Error("embedding api returned no embedding");
+  return embedding;
+}
+
+async function embedWithOpenAiCompatible(text: string, settings: AppConfig["search"]): Promise<number[]> {
+  const endpoint = settings.embedding_endpoint.trim();
+  if (!endpoint) throw new Error("embedding_endpoint is required for openai_compatible embeddings");
+  const base = endpoint.replace(/\/+$/u, "");
+  const url = base.endsWith("/embeddings") ? base : `${base}/embeddings`;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (settings.embedding_api_key?.trim()) headers.Authorization = `Bearer ${settings.embedding_api_key.trim()}`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ model: settings.embedding_model, input: text }),
+    signal: AbortSignal.timeout(settings.embedding_timeout_seconds * 1000),
+  });
+  if (!response.ok) throw new Error(`embedding api error (${response.status})`);
+  const payload = await response.json() as { data?: Array<{ embedding?: number[] }>; embeddings?: number[][] };
+  const embedding = payload.data?.[0]?.embedding ?? payload.embeddings?.[0];
   if (!embedding) throw new Error("embedding api returned no embedding");
   return embedding;
 }

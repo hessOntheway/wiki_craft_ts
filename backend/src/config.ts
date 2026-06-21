@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import * as fssync from "node:fs";
 import path from "node:path";
-import type { AppConfig, KnowledgeBaseList, KnowledgeBaseRecord, WorkspacePaths } from "./types.ts";
+import type { AppConfig, EmbeddingProvider, KnowledgeBaseList, KnowledgeBaseRecord, WorkspacePaths } from "./types.ts";
 import { ensureDir, escapeTomlString, nowMs, pathExists, pathExistsSync, readJson, slugify, writeJson } from "./util.ts";
 
 const DEFAULT_CONFIG_PATH = "wiki_craft.toml";
@@ -151,6 +151,9 @@ export async function loadGlobalConfig(configPath: string): Promise<AppConfig> {
     },
     search: {
       embedding_enabled: booleanAt(search, "embedding_enabled", false),
+      embedding_provider: embeddingProviderAt(search),
+      embedding_endpoint: stringAt(search, "embedding_endpoint", ""),
+      embedding_api_key: optionalStringAt(search, "embedding_api_key"),
       ollama_endpoint: stringAt(search, "ollama_endpoint", "http://127.0.0.1:11434"),
       embedding_model: stringAt(search, "embedding_model", "bge-m3"),
       embedding_dimensions: numberAt(search, "embedding_dimensions", 1024),
@@ -262,6 +265,17 @@ function stringAt(root: Record<string, unknown>, key: string, fallback: string):
   return typeof value === "string" && value.trim() ? value : fallback;
 }
 
+function optionalStringAt(root: Record<string, unknown>, key: string): string | null {
+  const value = root[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function embeddingProviderAt(root: Record<string, unknown>): EmbeddingProvider {
+  const raw = typeof root.embedding_provider === "string" ? root.embedding_provider.trim().toLowerCase() : "";
+  if (raw === "none" || raw === "ollama" || raw === "openai_compatible") return raw;
+  return booleanAt(root, "embedding_enabled", false) ? "ollama" : "none";
+}
+
 function numberAt(root: Record<string, unknown>, key: string, fallback: number): number {
   const value = Number(root[key]);
   return Number.isFinite(value) ? value : fallback;
@@ -308,7 +322,7 @@ function knowledgeBaseToml(name: string, focus: string): string {
 }
 
 function defaultConfigToml(): string {
-  return `# Wiki Craft configuration.\n\n[runtime]\nroot = ".wiki_craft"\n\n[search]\nembedding_enabled = false\nollama_endpoint = "http://127.0.0.1:11434"\nembedding_model = "bge-m3"\nembedding_dimensions = 1024\nembedding_timeout_seconds = 10\n`;
+  return `# Wiki Craft configuration.\n\n[runtime]\nroot = ".wiki_craft"\n\n[search]\n# Embeddings are optional. Use "none" for BM25/graph-only search, "ollama"\n# for a local Ollama embedder, or "openai_compatible" for a /v1/embeddings API.\nembedding_enabled = false\nembedding_provider = "none"\nembedding_endpoint = ""\nembedding_api_key = ""\nollama_endpoint = "http://127.0.0.1:11434"\nembedding_model = "bge-m3"\nembedding_dimensions = 1024\nembedding_timeout_seconds = 10\n`;
 }
 
 function defaultSchemaMarkdown(): string {

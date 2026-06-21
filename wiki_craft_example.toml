@@ -5,6 +5,9 @@ root = ".wiki_craft"
 
 [search]
 embedding_enabled = false
+embedding_provider = "none" # none | ollama | openai_compatible
+embedding_endpoint = ""
+embedding_api_key = ""
 ollama_endpoint = "http://127.0.0.1:11434"
 embedding_model = "bge-m3"
 embedding_dimensions = 1024
