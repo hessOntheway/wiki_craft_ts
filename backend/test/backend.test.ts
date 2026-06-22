@@ -66,14 +66,12 @@ test("validated import reports authoring warnings and preserves frontmatter sign
   await fs.writeFile(missing, "# Loose Report\n\nA long mixed note without the recommended sections.");
 
   const imported = await importLocalFile(configPath, kb.id, missing, true);
-  assert.ok(imported.warnings.some((warning) => warning.includes("missing frontmatter")));
-  assert.ok(imported.warnings.some((warning) => warning.includes("missing tags")));
-  assert.ok(imported.warnings.some((warning) => warning.includes("missing Evidence")));
+  assert.ok(imported.warnings.some((warning) => warning.includes("missing Summary")));
   const generated = await fs.readFile(path.join(kb.root, "knowledge", "approved", imported.summary_path), "utf8");
   assert.match(generated, /tags: \["imported"\]/);
 
   const structured = path.join(root, "structured.md");
-  await fs.writeFile(structured, "---\ntitle: \"Payment Review\"\naliases: [payments]\ntags: [business-context, review]\n---\n\n# Payment Review\n\n## Summary\n\nPayment risk.\n\n## Review Guidance\n\nCheck refunds.\n\n## Evidence\n\nbackend/src/payments.ts\n");
+  await fs.writeFile(structured, "---\ntitle: \"Payment Review\"\naliases: [payments]\ntags: [business-context, review]\n---\n\n# Payment Review\n\n## Summary\n\nPayment risk.\n\n## Exported API\n\n### `reviewPayment(input)`\n\n- Purpose: Review a payment.\n- Parameters:\n  - `input`: Payment input.\n- Returns: Payment review result.\n");
   const structuredImport = await importLocalFile(configPath, kb.id, structured, true);
   assert.deepEqual(structuredImport.warnings, []);
   const structuredGenerated = await fs.readFile(path.join(kb.root, "knowledge", "approved", structuredImport.summary_path), "utf8");
@@ -103,35 +101,117 @@ test("search returns bm25 results with clamped top_k", async () => {
   assert.equal(status.indexed_chunks, 2);
 });
 
-test("graph index builds approved metadata relations and refreshes stale edges", async () => {
+test("code-model reindex chunks strict layers and derives graph edges", async () => {
   const { configPath } = await fixture();
   const kb = await createKnowledgeBase(configPath, { name: "Graphable", focus: "graph search" });
-  const topic = path.join(kb.root, "knowledge", "approved", "topics", "review.md");
-  await fs.writeFile(topic, "---\ntitle: \"Review Rules\"\ntags: [review-policy]\nsource_ids: [source-alpha]\n---\n\n# Review Rules\n\nUse [[Payment Flow]] evidence for review.");
+  const codeModel = path.join(kb.root, "knowledge", "approved", "topics", "code-model");
+  await fs.mkdir(codeModel, { recursive: true });
+  await fs.writeFile(path.join(codeModel, "l1-backend-repo.md"), `# Backend Repository Model
 
-  const response = await searchConfigured(configPath, kb.id, "Payment Flow", 5);
-  assert.equal(response.retrieval_mode, "graph_hybrid");
+## Summary
+
+PROJECT_OVERVIEW_ONLY Backend summary.
+
+## Capabilities
+
+### Approved Search
+
+- Business function: Search approved knowledge.
+- Drill down to L2:
+  - [Backend HTTP Endpoints](l2-http-endpoints.md): \`GET /api/search\`
+
+### Skill Export
+
+- Business function: Generate skills.
+- Drill down to L2:
+  - [Backend HTTP Endpoints](l2-http-endpoints.md): \`POST /api/knowledge-bases/:kb_id/skill\`
+`);
+  await fs.writeFile(path.join(codeModel, "l2-http-endpoints.md"), `# Backend HTTP Endpoints
+
+## Summary
+
+HTTP API summary.
+
+## Endpoints
+
+### \`GET /api/search\`
+
+- Business function: Search approved knowledge.
+- Entry parameters:
+  - Query \`knowledge_base\`: Knowledge base ID.
+  - Query \`query\`: Search text.
+- Calls L3:
+  - \`search.searchConfigured(configPath, knowledgeBaseId, query, topK, requireExplicitKnowledgeBase)\`
+
+### \`POST /api/knowledge-bases/:kb_id/skill\`
+
+- Business function: Generate a skill.
+- Entry parameters:
+  - Path \`kb_id\`: Knowledge base ID.
+- Calls L3:
+  - \`runtime.createSkill(configPath, kbId, target, destination, workflow)\`
+`);
+  await fs.writeFile(path.join(codeModel, "l3-search-module.md"), `# Search Module API
+
+## Summary
+
+Search module summary.
+
+## Exported API
+
+### \`searchConfigured(configPath, knowledgeBaseId, query, topK, requireExplicitKnowledgeBase?)\`
+
+- Purpose: Search approved knowledge.
+- Parameters:
+  - \`query\`: Search text.
+- Returns: Search response.
+
+### \`reindexConfigured(configPath, knowledgeBaseId?, lexicalOnly?)\`
+
+- Purpose: Rebuild indexes.
+- Parameters:
+  - \`knowledgeBaseId\`: Knowledge base ID.
+- Returns: Index status.
+`);
+  await fs.writeFile(path.join(codeModel, "modeling-guide.md"), `# Modeling Guide
+
+## Summary
+
+This format guide should not become a search chunk.
+`);
+
+  const status = await reindexConfigured(configPath, kb.id, true);
+  assert.equal(status.graph_edges, 4);
+
+  const response = await searchConfigured(configPath, kb.id, "searchConfigured", 5);
+  assert.equal(response.retrieval_mode, "bm25");
   assert.ok(response.index_status.graph_edges > 0);
-  assert.ok((response.results[0].score_breakdown?.graph ?? 0) > 0);
-  assert.ok(response.results[0].supporting_relations?.some((relation) => relation.predicate === "links_to" && relation.object === "Payment Flow"));
+  assert.ok(response.results.every((result) => !result.score_breakdown?.graph));
+
+  const graphResponse = await searchConfigured(configPath, kb.id, "what endpoints use search.searchConfigured", 5);
+  assert.equal(graphResponse.retrieval_mode, "graph_hybrid");
+  assert.ok(graphResponse.results.some((result) => result.supporting_relations?.some((relation) => relation.predicate === "uses_l3_method")));
+
+  const chineseGraphIntent = await searchConfigured(configPath, kb.id, "哪些接口调用 search.searchConfigured", 5);
+  assert.equal(chineseGraphIntent.retrieval_mode, "bm25");
+  assert.ok(chineseGraphIntent.results.every((result) => !result.score_breakdown?.graph));
 
   const dbPath = path.join(kb.root, "runtime", "search", "index.sqlite");
-  let db = new DatabaseSync(dbPath);
+  const db = new DatabaseSync(dbPath);
   try {
-    const row = db.prepare("SELECT COUNT(*) AS count FROM search_graph_edges WHERE predicate IN ('has_tag', 'links_to', 'has_source')").get() as { count: number };
-    assert.ok(row.count >= 3);
-  } finally {
-    db.close();
-  }
-
-  await fs.writeFile(topic, "---\ntitle: \"Review Rules\"\ntags: [updated-policy]\n---\n\n# Review Rules\n\nUpdated evidence no longer links the old flow.");
-  await reindexConfigured(configPath, kb.id, true);
-  db = new DatabaseSync(dbPath);
-  try {
-    const stale = db.prepare("SELECT COUNT(*) AS count FROM search_graph_edges WHERE object = 'Payment Flow'").get() as { count: number };
-    assert.equal(stale.count, 0);
-    const fresh = db.prepare("SELECT COUNT(*) AS count FROM search_graph_edges WHERE object = 'updated-policy'").get() as { count: number };
-    assert.equal(fresh.count, 1);
+    const codeChunks = db.prepare("SELECT chunk_id, heading FROM search_chunks WHERE chunk_id LIKE 'topics/code-model/%' ORDER BY chunk_id").all() as Array<{ chunk_id: string; heading: string }>;
+    assert.equal(codeChunks.length, 6);
+    assert.ok(codeChunks.some((chunk) => chunk.heading === "Approved Search"));
+    assert.ok(codeChunks.some((chunk) => chunk.heading === "Endpoints > GET /api/search"));
+    assert.ok(codeChunks.some((chunk) => chunk.heading === "Exported API > searchConfigured(configPath, knowledgeBaseId, query, topK, requireExplicitKnowledgeBase?)"));
+    const projectIndex = db.prepare("SELECT COUNT(*) AS count FROM search_chunks WHERE body LIKE '%PROJECT_OVERVIEW_ONLY%' OR chunk_id = 'topics/code-model/modeling-guide.md#0'").get() as { count: number };
+    assert.equal(projectIndex.count, 0);
+    const l1 = db.prepare("SELECT COUNT(*) AS count FROM search_graph_edges WHERE predicate = 'drills_down_to_l2'").get() as { count: number };
+    assert.equal(l1.count, 2);
+    const l2 = db.prepare("SELECT COUNT(*) AS count FROM search_graph_edges WHERE predicate = 'uses_l3_method'").get() as { count: number };
+    assert.equal(l2.count, 2);
+    const metadata = db.prepare("SELECT COUNT(*) AS count FROM search_graph_edges WHERE predicate IN ('has_tag', 'links_to', 'has_source')").get() as { count: number };
+    assert.equal(metadata.count, 0);
   } finally {
     db.close();
   }
@@ -153,6 +233,22 @@ test("skill generation uses fixed CLI search command", async () => {
   const { root, configPath } = await fixture();
   const kb = await createKnowledgeBase(configPath, { name: "Agent Memory", focus: "Agent memory research" });
   await fs.writeFile(path.join(kb.root, "knowledge", "approved", "topics", "retrieval.md"), "---\ntitle: \"Retrieval Patterns\"\naliases: [lookup]\ntags: [memory]\n---\n\n# Retrieval Patterns\n");
+  const codeModel = path.join(kb.root, "knowledge", "approved", "topics", "code-model");
+  await fs.mkdir(codeModel, { recursive: true });
+  await fs.writeFile(path.join(codeModel, "l1-agent-memory.md"), `# Agent Memory Code Model
+
+## Summary
+
+Agent Memory stores approved knowledge and retrieves it for AI review.
+
+## Capabilities
+
+### Retrieval
+
+- Business function: Retrieve knowledge.
+- Drill down to L2:
+  - [Search Interfaces](l2-search.md): \`search\`
+`);
   const destination = path.join(root, "skills");
   const outcome = await createSkill(configPath, kb.id, "custom", destination);
   const skill = await fs.readFile(path.join(outcome.skill_path, "SKILL.md"), "utf8");
@@ -161,6 +257,14 @@ test("skill generation uses fixed CLI search command", async () => {
   assert.match(skill, /Retrieval Patterns/);
   assert.match(skill, /npm run wiki-craft -- --config/);
   assert.match(skill, new RegExp(`--knowledge-base '${kb.id}'`));
+  assert.match(skill, /Project Index/);
+  assert.match(skill, /Agent Memory stores approved knowledge/);
+  assert.match(skill, /Drill down to L2/);
+  assert.match(skill, /Calls L3/);
+  assert.match(skill, /only recognizes English graph-intent words/);
+  assert.match(skill, /Queries without one of these exact English words will not use graph relations/);
+  assert.match(skill, /what endpoints use search\.searchConfigured/);
+  assert.match(skill, /which command invokes runtime\.createSkill/);
   assert.doesNotMatch(skill, /cargo run/);
   await assert.rejects(() => createSkill(configPath, kb.id, "custom"), /destination_path is required/);
 });
@@ -174,8 +278,13 @@ test("author skill generation writes code analysis authoring contract", async ()
   assert.equal(outcome.skill_name, "wiki-craft-review-knowledge-author");
   assert.equal(outcome.workflow, "author");
   assert.match(skill, /Authoring Contract/);
-  assert.match(skill, /Code\/Workflow Map/);
-  assert.match(skill, /Review Guidance/);
+  assert.match(skill, /docs\/code-model\/modeling-guide\.md/);
+  assert.match(skill, /must follow that guide exactly/);
+  assert.match(skill, /L2 Interface Page Format/);
+  assert.match(skill, /Calls L3/);
+  assert.match(skill, /Forbidden Sections/);
+  assert.doesNotMatch(skill, /Code\/Workflow Map/);
+  assert.doesNotMatch(skill, /Review Guidance/);
   assert.match(skill, /import-local --knowledge-base/);
   assert.match(skill, /--validate/);
 });

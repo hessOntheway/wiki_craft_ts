@@ -35,6 +35,12 @@ interface SourceRecord {
   summary_path: string;
 }
 
+interface ProjectIndexSignal {
+  path: string;
+  title: string;
+  summary: string;
+}
+
 export async function health(): Promise<{ ok: true; service: "app" }> {
   return { ok: true, service: "app" };
 }
@@ -92,10 +98,11 @@ export async function createSkill(configPath: string, kbId: string, target: "cod
   const skillPath = path.join(base, skillName);
   await ensureDir(skillPath);
   const signals = await collectSkillSignals(config.knowledge_base.root);
+  const projectIndex = await collectProjectIndexSignal(config.knowledge_base.root);
   const focus = config.knowledge_base.focus;
   const skill = workflow === "author"
     ? authorSkillMarkdown({ configPath, id: config.knowledge_base.id, name: config.knowledge_base.name, focus, signals, skillName })
-    : searchSkillMarkdown({ configPath, id: config.knowledge_base.id, name: config.knowledge_base.name, focus, signals, skillName });
+    : searchSkillMarkdown({ configPath, id: config.knowledge_base.id, name: config.knowledge_base.name, focus, signals, skillName, projectIndex });
   await fs.writeFile(path.join(skillPath, "SKILL.md"), skill);
   if (target === "codex") {
     await ensureDir(path.join(skillPath, "agents"));
@@ -159,11 +166,11 @@ async function localSource(file: string, validate: boolean): Promise<{ source_id
 
 function validationWarnings(input: { raw: string; body: string; parsed?: ReturnType<typeof parseVaultFrontmatter>; tags: string[]; isMarkdown: boolean }): string[] {
   const warnings: string[] = [];
-  if (input.isMarkdown && !input.raw.startsWith("---\n")) warnings.push("missing frontmatter; generated minimum Wiki Craft metadata");
-  if (input.tags.length === 1 && input.tags[0] === "imported" && (!input.parsed || input.parsed.tags.length === 0)) warnings.push("missing tags; defaulted to imported");
   if (!/^#\s+\S+/mu.test(input.body) && !input.parsed?.title) warnings.push("missing page title or H1 heading");
-  if (!/^##\s+Evidence\b/imu.test(input.body)) warnings.push("missing Evidence section");
-  if (!/^##\s+Review Guidance\b/imu.test(input.body)) warnings.push("missing Review Guidance section");
+  if (!/^##\s+Summary\b/imu.test(input.body)) warnings.push("missing Summary section");
+  for (const section of ["Evidence", "Review Guidance", "Relations", "Graph Triples", "Important Internal Flow", "Review Notes"]) {
+    if (new RegExp(`^##\\s+${section}\\b`, "imu").test(input.body)) warnings.push(`deprecated code-model section: ${section}`);
+  }
   if (input.body.length > 12_000) warnings.push("document is long; split stable topics into separate pages for better chunks");
   return warnings;
 }
@@ -172,16 +179,19 @@ function frontmatterList(values: string[]): string {
   return `[${values.map((value) => `"${escapeTomlString(value)}"`).join(", ")}]`;
 }
 
-function searchSkillMarkdown(input: { configPath: string; id: string; name: string; focus: string; signals: string[]; skillName: string }): string {
+function searchSkillMarkdown(input: { configPath: string; id: string; name: string; focus: string; signals: string[]; skillName: string; projectIndex?: ProjectIndexSignal | null }): string {
   const description = truncateChars(`Use when discussion may benefit from the Wiki Craft knowledge base "${input.name}". Focus: ${input.focus}.${input.signals.length ? ` Approved index/topic signals: ${input.signals.join(", ")}.` : ""} Search this specific knowledge base with Wiki Craft before answering.`, 900);
   const command = `npm run wiki-craft -- --config ${shellQuote(path.resolve(input.configPath))} search --knowledge-base ${shellQuote(input.id)} --query "<query>" --top-k 5 --json`;
-  return `---\nname: ${input.skillName}\ndescription: ${JSON.stringify(description)}\n---\n\n# ${input.name}\n\nUse this skill when the user is asking about, designing, comparing, reviewing, or validating work related to this Wiki Craft knowledge base.\n\n## Knowledge Base\n\n- Name: ${input.name}\n- ID: \`${input.id}\`\n- Focus: ${input.focus}\n- Approved index/topic signals: ${input.signals.length ? input.signals.join(", ") : "No approved topic headings were available when this skill was generated."}\n\n## Search Workflow\n\nSearch this exact knowledge base before answering when the conversation overlaps the focus or signals above. Prefer approved \`topic\` and \`index\` results as durable knowledge. Use \`source_summary\` results as evidence and cite returned source URLs when available.\n\nUse the Wiki Craft TS CLI:\n\n\`\`\`bash\n${command}\n\`\`\`\n\nReplace \`<query>\` with a concise natural-language query. For design or review questions, search the key concept first, then run one or two follow-up searches for architecture, tradeoffs, failure modes, or terminology found in the first results.\n\nOnly treat returned approved knowledge as authoritative.\n`;
+  const projectIndexText = input.projectIndex
+    ? `- Project index source: \`${input.projectIndex.path}\`\n- Project index title: ${input.projectIndex.title}\n- Project index summary: ${input.projectIndex.summary}`
+    : "- Project index source: No code-model L1 Summary was available when this skill was generated.";
+  return `---\nname: ${input.skillName}\ndescription: ${JSON.stringify(description)}\n---\n\n# ${input.name}\n\nUse this skill when the user is asking about, designing, comparing, reviewing, or validating work related to this Wiki Craft knowledge base.\n\n## Knowledge Base\n\n- Name: ${input.name}\n- ID: \`${input.id}\`\n- Focus: ${input.focus}\n- Approved index/topic signals: ${input.signals.length ? input.signals.join(", ") : "No approved topic headings were available when this skill was generated."}\n\n## Project Index\n\nBefore searching, read the project index directly for orientation. This overview is intentionally not a search chunk; it comes from the L1 \`## Summary\` in the code-model knowledge base.\n\n${projectIndexText}\n\n## Search Workflow\n\nSearch this exact knowledge base before answering when the conversation overlaps the focus or signals above. Prefer approved \`topic\` and \`index\` results as durable knowledge. Use \`source_summary\` results as evidence and cite returned source URLs when available.\n\nUse the Wiki Craft TS CLI:\n\n\`\`\`bash\n${command}\n\`\`\`\n\nReplace \`<query>\` with a concise natural-language query. Normal searches use keyword and vector hybrid ranking when embeddings are available; otherwise they use BM25.\n\n## Code-Model Graph Retrieval\n\nThe code model is layered as L1 capability -> L2 interface -> L3 exported API. L1 graph relations come from exact \`Drill down to L2\` fields, and L2 graph relations come from exact \`Calls L3\` fields.\n\nGraph retrieval is intentionally opt-in and only recognizes English graph-intent words. If you need to follow usage or invocation relationships, the query must include one of these English words: \`use\`, \`uses\`, \`used\`, \`using\`, \`invoke\`, \`invokes\`, \`invoked\`, \`invoking\`, \`call\`, \`calls\`, \`called\`, or \`calling\`. Queries without one of these exact English words will not use graph relations.\n\nExamples:\n\n\`\`\`bash\n${command.replace("<query>", "search knowledge base registry")}\n${command.replace("<query>", "what endpoints use search.searchConfigured")}\n${command.replace("<query>", "which command invokes runtime.createSkill")}\n\`\`\`\n\nOnly treat returned approved knowledge as authoritative.\n`;
 }
 
 function authorSkillMarkdown(input: { configPath: string; id: string; name: string; focus: string; signals: string[]; skillName: string }): string {
   const description = truncateChars(`Use when producing structured Wiki Craft topic Markdown for "${input.name}" from code analysis. Focus: ${input.focus}. Follow the authoring contract so future AI code review can retrieve accurate business and code context.`, 900);
   const importCommand = `npm run wiki-craft -- --config ${shellQuote(path.resolve(input.configPath))} import-local --knowledge-base ${shellQuote(input.id)} --file "<topic.md>" --validate`;
-  return `---\nname: ${input.skillName}\ndescription: ${JSON.stringify(description)}\n---\n\n# ${input.name} Authoring\n\nUse this skill when analyzing source code to produce Wiki Craft approved topic candidates for future AI code review. Do not edit the user's repository or approved vault directly. Produce Markdown files that the user can inspect and import.\n\n## Knowledge Base\n\n- Name: ${input.name}\n- ID: \`${input.id}\`\n- Focus: ${input.focus}\n- Existing signals: ${input.signals.length ? input.signals.join(", ") : "No approved topic headings were available when this skill was generated."}\n\n## Authoring Contract\n\nEach generated file must be one stable topic, not a long mixed report. Use this exact frontmatter shape:\n\n\`\`\`yaml\n---\ntitle: \"<stable topic name>\"\naliases: [\"<synonym or module name>\"]\ntags: [\"business-context\", \"code-review\"]\nsource_ids: []\nsource_urls: []\nversion_hashes: []\n---\n\`\`\`\n\nRequired sections:\n\n\`\`\`md\n# <stable topic name>\n\n## Summary\n\n## Business Context\n\n## Code/Workflow Map\n\n## Review Guidance\n\n## Relations\n\n## Evidence\n\n## Conflicts & Uncertainties\n\`\`\`\n\n## Writing Rules\n\n- Keep each page focused on one workflow, domain rule, integration, or review risk.\n- Put every important searchable concept in a heading, tag, alias, wikilink, or concise paragraph.\n- Preserve source evidence as file paths, function names, endpoint names, config keys, or commit/version notes.\n- Mark assumptions and uncertain claims explicitly instead of making them sound authoritative.\n- Prefer several short topic files over one large report when code spans unrelated domains.\n\n## Import Check\n\nAfter the user reviews a generated topic file, they can import it with validation:\n\n\`\`\`bash\n${importCommand}\n\`\`\`\n`;
+  return `---\nname: ${input.skillName}\ndescription: ${JSON.stringify(description)}\n---\n\n# ${input.name} Authoring\n\nUse this skill when analyzing source code to produce Wiki Craft code-model Markdown for AI code review. Do not edit the user's repository or approved vault directly. Produce Markdown files that the user can inspect and import.\n\n## Knowledge Base\n\n- Name: ${input.name}\n- ID: \`${input.id}\`\n- Focus: ${input.focus}\n- Existing signals: ${input.signals.length ? input.signals.join(", ") : "No approved topic headings were available when this skill was generated."}\n\n## Mandatory Format Source\n\nBefore authoring, read \`docs/code-model/modeling-guide.md\` from the target repository when it exists. You must follow that guide exactly. If the guide is unavailable, follow the mandatory fallback contract below exactly.\n\nThe exact headings and field labels are part of the indexing contract. Do not rename them, translate them, omit them, or replace them with synonyms.\n\n## Authoring Contract\n\nEach generated file must be one stable code-model page, not a long mixed report. Do not add YAML frontmatter. Do not create \`index.md\` pages. Use H1 as the first line.\n\n## L1 Capability Page Format\n\nUse L1 for project-level capability summaries. L1 must drill down only to L2 pages, never directly to L3 methods or source modules.\n\n\`\`\`md\n# <Project Or Repository Model>\n\n## Summary\n\n## Capabilities\n\n### <Capability Name>\n\n- Business function:\n- Drill down to L2:\n  - [<L2 page title>](<l2-file.md>): <interface names>\n\`\`\`\n\nRequired L1 keywords: \`## Summary\`, \`## Capabilities\`, \`- Business function:\`, \`- Drill down to L2:\`.\n\n## L2 Interface Page Format\n\nUse L2 for external interfaces. Treat HTTP endpoints, CLI commands, gRPC methods, Kafka consumers, scheduled jobs, and other stable external entrypoints as interfaces. The interface-family heading must be one of the exact headings below when applicable: \`## Endpoints\`, \`## Commands\`, \`## gRPC Methods\`, \`## Kafka Consumers\`.\n\n\`\`\`md\n# <Interface Family Title>\n\n## Summary\n\n## Endpoints\n\n### <INTERFACE NAME>\n\n- Business function:\n- Entry parameters:\n- Calls L3:\n  - \`module.method(signature)\`\n\`\`\`\n\nRequired L2 keywords: \`## Summary\`, an interface-family heading such as \`## Endpoints\` or \`## Commands\`, \`- Business function:\`, \`- Entry parameters:\`, and \`- Calls L3:\`.\n\nGraph indexing is derived from L2. Do not hand-author \`Graph Triples\`; the index builder reads each interface heading and its \`Calls L3\` list.\n\n## L3 Exported API Page Format\n\nUse L3 for exported functions, exported classes and public methods, or important object boundaries. Do not create L3 pages for pure type/interface collections or generic utility-only modules.\n\n\`\`\`md\n# <Module Or Object API>\n\n## Summary\n\n## Exported API\n\n### \`functionName(signature)\`\n\n- Purpose:\n- Parameters:\n  - \`parameterName\`: <meaning>\n- Returns:\n\`\`\`\n\nRequired L3 keywords: \`## Summary\`, \`## Exported API\`, \`- Purpose:\`, \`- Parameters:\`, and \`- Returns:\`.\n\n## Forbidden Sections\n\nDo not include these sections in generated code-model pages: \`## Relations\`, \`## Evidence\`, \`## Review Notes\`, \`## Important Internal Flow\`, or \`## Graph Triples\`.\n\n## Writing Rules\n\n- Keep each page focused on one layer unit: one capability page, one interface family, or one exported API module/object.\n- Keep each capability, interface, or exported method in its own subsection so chunking keeps the name and required fields together.\n- Preserve searchable names in headings and fields: endpoint paths, command names, gRPC method names, Kafka topic or consumer names, function names, config keys, and source file paths when useful.\n- Mark uncertainty in plain text inside the relevant field instead of inventing sections.\n- Prefer several short model files over one large mixed report when code spans unrelated capabilities or interfaces.\n\n## Import Check\n\nAfter the user reviews a generated topic file, they can import it with validation:\n\n\`\`\`bash\n${importCommand}\n\`\`\`\n`;
 }
 
 function fenceInfo(extension: string): string {
@@ -207,6 +217,39 @@ async function collectSkillSignals(kbRoot: string): Promise<string[]> {
     if (signals.size >= 18) break;
   }
   return [...signals].sort().slice(0, 12);
+}
+
+async function collectProjectIndexSignal(kbRoot: string): Promise<ProjectIndexSignal | null> {
+  const codeModelRoot = path.join(kbRoot, "knowledge", "approved", "topics", "code-model");
+  const files = (await listFiles(codeModelRoot, (candidate) => path.basename(candidate).startsWith("l1-") && candidate.endsWith(".md"))).sort();
+  for (const file of files) {
+    const parsed = parseVaultFrontmatter(await fs.readFile(file, "utf8"));
+    const summary = markdownSection(parsed.body, "Summary");
+    if (!summary) continue;
+    return {
+      path: file,
+      title: parsed.title ?? h1Title(parsed.body) ?? path.basename(file),
+      summary: truncateChars(summary, 900),
+    };
+  }
+  return null;
+}
+
+function markdownSection(body: string, heading: string): string | null {
+  const lines = body.split(/\r?\n/u);
+  const start = lines.findIndex((line) => line.trim() === `## ${heading}`);
+  if (start < 0) return null;
+  const out: string[] = [];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^##\s+/u.test(lines[index])) break;
+    out.push(lines[index]);
+  }
+  const text = out.join("\n").trim();
+  return text || null;
+}
+
+function h1Title(body: string): string | undefined {
+  return body.split(/\r?\n/u).find((line) => /^#\s+\S/u.test(line))?.replace(/^#\s+/u, "").trim();
 }
 
 async function collectMarkdownSignals(file: string, signals: Set<string>): Promise<void> {

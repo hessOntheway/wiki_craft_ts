@@ -50,16 +50,16 @@ test("CLI init, knowledge-base, import, search, reindex, and skill flow", async 
   const imported = parseJson<{ changed: boolean; summary_path: string; warnings: string[] }>(await runCli(configPath, ["import-local", "--knowledge-base", kb.id, "--file", source, "--validate"]));
   assert.equal(imported.changed, true);
   assert.match(imported.summary_path, /^evidence\/source_summaries\//);
-  assert.ok(imported.warnings.some((warning) => warning.includes("missing frontmatter")));
+  assert.ok(imported.warnings.some((warning) => warning.includes("missing Summary")));
 
   const search = parseJson<{ retrieval_mode: string; index_status: { graph_edges: number }; results: Array<{ title: string; score_breakdown?: { graph?: number } }> }>(await runCli(configPath, ["search", "--knowledge-base", kb.id, "--query", "direct local import", "--json"]));
-  assert.equal(search.retrieval_mode, "graph_hybrid");
+  assert.equal(search.retrieval_mode, "bm25");
   assert.ok(search.results.length > 0);
-  assert.ok(search.index_status.graph_edges > 0);
+  assert.equal(search.index_status.graph_edges, 0);
 
   const graphText = await runCli(configPath, ["search", "--knowledge-base", kb.id, "--query", "imported"]);
   assert.equal(graphText.code, 0, graphText.stderr);
-  assert.match(graphText.stdout, /related:/);
+  assert.doesNotMatch(graphText.stdout, /related:/);
 
   const reindex = parseJson<{ indexed_chunks: number }>(await runCli(configPath, ["reindex", "--knowledge-base", kb.id, "--lexical-only"]));
   assert.equal(reindex.indexed_chunks, 2);
@@ -75,7 +75,9 @@ test("CLI init, knowledge-base, import, search, reindex, and skill flow", async 
   const authorBody = await fs.readFile(path.join(authorSkill.skill_path, "SKILL.md"), "utf8");
   assert.equal(authorSkill.workflow, "author");
   assert.match(authorBody, /Authoring Contract/);
-  assert.match(authorBody, /Code\/Workflow Map/);
+  assert.match(authorBody, /docs\/code-model\/modeling-guide\.md/);
+  assert.match(authorBody, /Calls L3/);
+  assert.match(authorBody, /Forbidden Sections/);
 
   const removed = await runCli(configPath, ["candidates", "list"]);
   assert.notEqual(removed.code, 0);

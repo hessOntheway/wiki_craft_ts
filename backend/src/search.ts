@@ -7,6 +7,12 @@ import { loadConfigForKnowledgeBase, listKnowledgeBases, workspacePaths } from "
 import { extractWikilinks, parseVaultFrontmatter } from "./runtime.ts";
 import { ensureDir, listFiles, normalizeWhitespace, pathExists, readJson, relPosix, sha256Hex, truncateChars, writeJson } from "./util.ts";
 
+interface ChunkGraphEdge {
+  subject: string;
+  predicate: string;
+  object: string;
+}
+
 interface SearchChunk {
   id: string;
   displayPath: string;
@@ -23,6 +29,7 @@ interface SearchChunk {
   source_urls: string[];
   version_hashes: string[];
   updated_at_run_id?: string | null;
+  graph_edges: ChunkGraphEdge[];
 }
 
 interface SearchIndexCache {
@@ -125,8 +132,9 @@ export async function searchConfigured(configPath: string, knowledgeBaseId: stri
       return [];
     })
     : [];
-  const graph = sqliteGraphHits(paths.searchIndexPath, trimmed, retrievalLimit).catch(() => []);
-  const graphHits = await graph;
+  const graphHits = wantsGraphTraversal(trimmed)
+    ? await sqliteGraphHits(paths.searchIndexPath, trimmed, retrievalLimit).catch(() => [])
+    : [];
   const scores = new Map<string, number>();
   const breakdown = new Map<string, { lexical?: number; vector?: number; graph?: number }>();
   const relations = new Map<string, SupportingRelation[]>();
@@ -245,14 +253,16 @@ async function readDocument(file: string, knowledgeRoot: string, kind: SearchChu
   const parsed = parseVaultFrontmatter(raw);
   const root = alternateRoot ?? knowledgeRoot;
   const relativePath = relPosix(root, file);
+  if (!alternateRoot && relativePath === "topics/code-model/modeling-guide.md") return [];
   const displayPath = alternateRoot ? `evidence/source_summaries/${relativePath}` : relativePath;
-  const sections = splitSections(parsed.body);
+  const title = parsed.title ?? h1Title(parsed.body);
+  const sections = codeModelSections(relativePath, parsed.body) ?? splitSections(parsed.body);
   return sections.map((section, index) => ({
     id: `${displayPath}#${index}`,
     displayPath,
     relativePath,
     kind,
-    title: parsed.title ?? null,
+    title: title ?? null,
     heading: section.heading,
     body: section.text,
     lineStart: parsed.body_start_line + section.lineOffset,
@@ -263,10 +273,11 @@ async function readDocument(file: string, knowledgeRoot: string, kind: SearchChu
     source_urls: parsed.source_urls,
     version_hashes: parsed.version_hashes,
     updated_at_run_id: parsed.updated_at_run_id ?? null,
+    graph_edges: section.graphEdges ?? [],
   }));
 }
 
-function splitSections(body: string): Array<{ heading?: string | null; text: string; lineOffset: number }> {
+function splitSections(body: string): Array<{ heading?: string | null; text: string; lineOffset: number; graphEdges?: ChunkGraphEdge[] }> {
   const lines = body.split(/\r?\n/u);
   const sections: Array<{ heading?: string | null; lines: string[]; lineOffset: number }> = [];
   let current = { heading: null as string | null, lines: [] as string[], lineOffset: 0 };
@@ -286,6 +297,124 @@ function splitSections(body: string): Array<{ heading?: string | null; text: str
     text: section.lines.join("\n"),
     lineOffset: section.lineOffset,
   }));
+}
+
+function codeModelSections(relativePath: string, body: string): Array<{ heading?: string | null; text: string; lineOffset: number; graphEdges?: ChunkGraphEdge[] }> | null {
+  if (!relativePath.startsWith("topics/code-model/")) return null;
+  const basename = path.posix.basename(relativePath);
+  if (basename.startsWith("l1-")) return l1CodeModelSections(body);
+  if (basename.startsWith("l2-")) return l2CodeModelSections(body);
+  if (basename.startsWith("l3-")) return l3CodeModelSections(body);
+  return null;
+}
+
+function h1Title(body: string): string | undefined {
+  return body.split(/\r?\n/u).find((line) => /^#\s+\S/u.test(line))?.replace(/^#\s+/u, "").trim();
+}
+
+function l1CodeModelSections(body: string): Array<{ heading?: string | null; text: string; lineOffset: number; graphEdges?: ChunkGraphEdge[] }> | null {
+  const capabilityBlocks = subsectionBlocks(body, "Capabilities", 3);
+  if (capabilityBlocks.length === 0) return null;
+  return capabilityBlocks.map((block) => ({
+    heading: block.heading,
+    text: block.text,
+    lineOffset: block.lineOffset,
+    graphEdges: drillDownEdges(block.heading, block.text),
+  }));
+}
+
+function l2CodeModelSections(body: string): Array<{ heading?: string | null; text: string; lineOffset: number; graphEdges?: ChunkGraphEdge[] }> | null {
+  const familyHeadings = ["Endpoints", "Commands", "gRPC Methods", "Kafka Consumers"];
+  const blocks = familyHeadings.flatMap((family) => subsectionBlocks(body, family, 3).map((block) => ({ ...block, family })));
+  if (blocks.length === 0) return null;
+  return blocks.sort((left, right) => left.lineOffset - right.lineOffset).map((block) => ({
+    heading: `${block.family} > ${block.heading}`,
+    text: block.text,
+    lineOffset: block.lineOffset,
+    graphEdges: callsL3Edges(block.heading, block.text),
+  }));
+}
+
+function l3CodeModelSections(body: string): Array<{ heading?: string | null; text: string; lineOffset: number; graphEdges?: ChunkGraphEdge[] }> | null {
+  const blocks = subsectionBlocks(body, "Exported API", 3);
+  if (blocks.length === 0) return null;
+  return blocks.map((block) => ({
+    heading: `Exported API > ${block.heading}`,
+    text: block.text,
+    lineOffset: block.lineOffset,
+    graphEdges: [],
+  }));
+}
+
+function subsectionBlocks(body: string, parentHeading: string, childLevel: number): Array<{ heading: string; text: string; lineOffset: number }> {
+  const lines = body.split(/\r?\n/u);
+  const parentLevel = Math.max(1, childLevel - 1);
+  const parentPattern = new RegExp(`^#{${parentLevel}}\\s+${escapeRegExp(parentHeading)}\\s*$`, "u");
+  const childPattern = new RegExp(`^#{${childLevel}}\\s+(.+)$`, "u");
+  const boundaryPattern = new RegExp(`^#{1,${childLevel}}\\s+`, "u");
+  const parentIndex = lines.findIndex((line) => parentPattern.test(line.trim()));
+  if (parentIndex < 0) return [];
+  const blocks: Array<{ heading: string; text: string; lineOffset: number }> = [];
+  let index = parentIndex + 1;
+  while (index < lines.length && !new RegExp(`^#{1,${parentLevel}}\\s+`, "u").test(lines[index])) {
+    const match = lines[index].match(childPattern);
+    if (!match) {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    const heading = cleanHeadingText(match[1]);
+    index += 1;
+    while (index < lines.length && !boundaryPattern.test(lines[index])) index += 1;
+    blocks.push({ heading, text: lines.slice(start, index).join("\n"), lineOffset: start });
+  }
+  return blocks;
+}
+
+function drillDownEdges(capability: string, text: string): ChunkGraphEdge[] {
+  return listItemsUnderField(text, "Drill down to L2")
+    .flatMap((item) => markdownLinkTargets(item))
+    .map((target) => ({ subject: capability, predicate: "drills_down_to_l2", object: target }));
+}
+
+function callsL3Edges(interfaceName: string, text: string): ChunkGraphEdge[] {
+  return listItemsUnderField(text, "Calls L3")
+    .filter((item) => item !== "None directly; spawns `backend/src/server.ts` with the current Node executable.")
+    .map(stripMarkdownCode)
+    .filter(Boolean)
+    .map((target) => ({ subject: interfaceName, predicate: "uses_l3_method", object: target }));
+}
+
+function listItemsUnderField(text: string, field: string): string[] {
+  const lines = text.split(/\r?\n/u);
+  const start = lines.findIndex((line) => line.trim() === `- ${field}:`);
+  if (start < 0) return [];
+  const out: string[] = [];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^-\s+\S/u.test(line)) break;
+    const match = line.match(/^\s{2,}-\s+(.+)$/u);
+    if (match) out.push(match[1].trim());
+  }
+  return out;
+}
+
+function markdownLinkTargets(text: string): string[] {
+  const matches = [...text.matchAll(/\[([^\]]+)\]\(([^)]+)\)/gu)];
+  if (matches.length === 0) return [stripMarkdownCode(text)];
+  return matches.map((match) => `${match[1].trim()} (${match[2].trim()})`);
+}
+
+function stripMarkdownCode(text: string): string {
+  return text.trim().replace(/^`|`$/gu, "");
+}
+
+function cleanHeadingText(text: string): string {
+  return stripMarkdownCode(text.replace(/\s+#+\s*$/u, ""));
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 function bm25(chunks: SearchChunk[], query: string): Array<{ id: string; score: number }> {
@@ -359,7 +488,7 @@ function syncSqliteIndex(sqlitePath: string, chunks: SearchChunk[], fingerprint:
   try {
     ensureSearchSchema(db);
     const current = db.prepare("SELECT value FROM search_meta WHERE key = 'vault_fingerprint'").get() as { value?: string } | undefined;
-    if (!force && current?.value === fingerprint && (chunks.length === 0 || graphEdgeCount(db) > 0)) return;
+    if (!force && current?.value === fingerprint) return;
     db.exec("CREATE TEMP TABLE IF NOT EXISTS active_search_chunks (chunk_id TEXT PRIMARY KEY); DELETE FROM active_search_chunks;");
     const active = db.prepare("INSERT INTO active_search_chunks (chunk_id) VALUES (?)");
     const upsert = db.prepare(`INSERT INTO search_chunks (
@@ -470,7 +599,6 @@ function rebuildGraphIndex(db: DatabaseSync, chunks: SearchChunk[]): void {
 }
 
 function graphEdgesForChunk(chunk: SearchChunk, contentHash: string): GraphEdge[] {
-  const subject = graphSubjectForChunk(chunk);
   const now = new Date().toISOString();
   const attrs = JSON.stringify({ kind: chunk.kind, path: chunk.displayPath, heading: chunk.heading ?? null });
   const edges: GraphEdge[] = [];
@@ -490,15 +618,7 @@ function graphEdgesForChunk(chunk: SearchChunk, contentHash: string): GraphEdge[
       updated_at: now,
     });
   };
-  push(chunk.displayPath, "has_kind", chunk.kind);
-  if (chunk.title) push(chunk.displayPath, "has_title", chunk.title);
-  if (chunk.heading) push(subject, "has_heading", chunk.heading);
-  for (const alias of chunk.aliases) push(alias, "alias_of", subject);
-  for (const tag of chunk.tags) push(subject, "has_tag", tag);
-  for (const link of chunk.wikilinks) push(subject, "links_to", link);
-  for (const sourceId of chunk.source_ids) push(subject, "has_source", sourceId);
-  for (const [index, sourceUrl] of chunk.source_urls.entries()) push(chunk.source_ids[index] ?? subject, "source_url", sourceUrl);
-  for (const [index, versionHash] of chunk.version_hashes.entries()) push(chunk.source_ids[index] ?? subject, "has_version", versionHash);
+  for (const edge of chunk.graph_edges) push(edge.subject, edge.predicate, edge.object);
   const seen = new Set<string>();
   return edges.filter((edge) => {
     const key = `${edge.chunk_id}\0${edge.subject}\0${edge.predicate}\0${edge.object}`;
@@ -506,10 +626,6 @@ function graphEdgesForChunk(chunk: SearchChunk, contentHash: string): GraphEdge[
     seen.add(key);
     return true;
   });
-}
-
-function graphSubjectForChunk(chunk: SearchChunk): string {
-  return chunk.title || chunk.heading || chunk.displayPath;
 }
 
 function graphEdgeId(edge: GraphEdge): string {
@@ -569,6 +685,14 @@ function graphMatchScore(row: { subject_norm: string; predicate_norm: string; ob
     if (row.predicate_norm.includes(term)) score += 0.45;
   }
   return score / Math.max(1, queryTerms.length);
+}
+
+function wantsGraphTraversal(query: string): boolean {
+  const terms = new Set(termsFor(query));
+  for (const term of ["use", "uses", "used", "using", "invoke", "invokes", "invoked", "invoking", "call", "calls", "called", "calling"]) {
+    if (terms.has(term)) return true;
+  }
+  return false;
 }
 
 function topRelations(relations: SupportingRelation[]): SupportingRelation[] {
