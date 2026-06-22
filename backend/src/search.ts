@@ -67,6 +67,13 @@ interface GraphHit {
   relations: SupportingRelation[];
 }
 
+interface GraphQueryPlan {
+  predicate: "uses_l3_method";
+  knownSide: "subject" | "object";
+  knownText: string;
+  knownTerms: string[];
+}
+
 export interface SearchResponse {
   query: string;
   top_k: number;
@@ -633,8 +640,8 @@ function graphEdgeId(edge: GraphEdge): string {
 }
 
 async function sqliteGraphHits(sqlitePath: string, query: string, limit: number): Promise<GraphHit[]> {
-  const terms = [...new Set(termsFor(query).map(normalizeGraphText).filter(Boolean))].slice(0, 20);
-  if (terms.length === 0) return [];
+  const plan = graphQueryPlan(query);
+  if (!plan) return [];
   const db = new DatabaseSync(sqlitePath);
   try {
     ensureSearchSchema(db);
@@ -653,7 +660,7 @@ async function sqliteGraphHits(sqlitePath: string, query: string, limit: number)
       }>;
     const byChunk = new Map<string, { score: number; relations: SupportingRelation[] }>();
     for (const row of rows) {
-      const matched = graphMatchScore(row, terms);
+      const matched = graphMatchScore(row, plan);
       if (matched <= 0) continue;
       const evidence = Math.max(1, Number(row.evidence_count) || 1);
       const contribution = matched * (1 + Math.log(evidence));
@@ -677,22 +684,60 @@ async function sqliteGraphHits(sqlitePath: string, query: string, limit: number)
   }
 }
 
-function graphMatchScore(row: { subject_norm: string; predicate_norm: string; object_norm: string }, queryTerms: string[]): number {
-  let score = 0;
-  for (const term of queryTerms) {
-    if (row.subject_norm.includes(term)) score += 0.9;
-    if (row.object_norm.includes(term)) score += 1;
-    if (row.predicate_norm.includes(term)) score += 0.45;
-  }
-  return score / Math.max(1, queryTerms.length);
+function graphMatchScore(row: { subject_norm: string; predicate_norm: string; object_norm: string }, plan: GraphQueryPlan): number {
+  if (row.predicate_norm !== normalizeGraphText(plan.predicate)) return 0;
+  const haystack = plan.knownSide === "subject" ? row.subject_norm : row.object_norm;
+  const matches = plan.knownTerms.filter((term) => haystack.includes(term)).length;
+  if (matches === 0) return 0;
+  const score = matches / Math.max(1, plan.knownTerms.length);
+  return score >= graphMatchThreshold(plan.knownTerms.length) ? score : 0;
 }
 
 function wantsGraphTraversal(query: string): boolean {
-  const terms = new Set(termsFor(query));
-  for (const term of ["use", "uses", "used", "using", "invoke", "invokes", "invoked", "invoking", "call", "calls", "called", "calling"]) {
-    if (terms.has(term)) return true;
-  }
-  return false;
+  return Boolean(graphQueryPlan(query));
+}
+
+function graphQueryPlan(query: string): GraphQueryPlan | null {
+  const relation = graphRelationMatch(query);
+  if (!relation) return null;
+  const normalized = normalizeWhitespace(query.trim());
+  const lower = normalized.toLowerCase();
+  const objectDirection = /^(?:what|which|who)\s+(?:endpoints?|interfaces?|commands?|apis?|routes?|entrypoints?)\s+/u.test(lower);
+  const subjectQuestion = lower.match(/^(?:what|which)\s+(?:methods?|functions?|apis?)\s+(?:does|do)\s+(.+?)\s+(?:use|uses|used|using|invoke|invokes|invoked|invoking|call|calls|called|calling)\b/u);
+  const knownText = subjectQuestion?.[1]
+    ?? (objectDirection ? normalized.slice(relation.index + relation.word.length) : normalized.slice(0, relation.index));
+  const cleaned = cleanGraphKnownText(knownText);
+  const knownTerms = graphKnownTerms(cleaned);
+  if (knownTerms.length === 0) return null;
+  return {
+    predicate: "uses_l3_method",
+    knownSide: objectDirection && !subjectQuestion ? "object" : "subject",
+    knownText: cleaned,
+    knownTerms,
+  };
+}
+
+function graphRelationMatch(query: string): { word: string; index: number } | null {
+  const match = /\b(use|uses|used|using|invoke|invokes|invoked|invoking|call|calls|called|calling)\b/iu.exec(query);
+  return match?.[0] ? { word: match[0], index: match.index } : null;
+}
+
+function cleanGraphKnownText(text: string): string {
+  return text
+    .replace(/^[\s:,-]+|[\s:,.?;!-]+$/gu, "")
+    .replace(/^(?:the|a|an)\s+/iu, "")
+    .replace(/\s+(?:method|methods|function|functions|api|apis|endpoint|endpoints|interface|interfaces|command|commands)$/iu, "")
+    .trim();
+}
+
+function graphKnownTerms(text: string): string[] {
+  const stop = new Set(["what", "which", "who", "does", "do", "the", "a", "an", "method", "methods", "function", "functions", "api", "apis", "endpoint", "endpoints", "interface", "interfaces", "command", "commands", "use", "uses", "used", "using", "invoke", "invokes", "invoked", "invoking", "call", "calls", "called", "calling"]);
+  return [...new Set(normalizeGraphText(text).split(/\s+/u).filter((term) => term && !stop.has(term)))].slice(0, 20);
+}
+
+function graphMatchThreshold(termCount: number): number {
+  if (termCount <= 2) return 1;
+  return 0.67;
 }
 
 function topRelations(relations: SupportingRelation[]): SupportingRelation[] {

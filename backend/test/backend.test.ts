@@ -188,9 +188,25 @@ This format guide should not become a search chunk.
   assert.ok(response.index_status.graph_edges > 0);
   assert.ok(response.results.every((result) => !result.score_breakdown?.graph));
 
-  const graphResponse = await searchConfigured(configPath, kb.id, "what endpoints use search.searchConfigured", 5);
-  assert.equal(graphResponse.retrieval_mode, "graph_hybrid");
-  assert.ok(graphResponse.results.some((result) => result.supporting_relations?.some((relation) => relation.predicate === "uses_l3_method")));
+  const objectGraphResponse = await searchConfigured(configPath, kb.id, "what endpoints use search.searchConfigured", 5);
+  assert.equal(objectGraphResponse.retrieval_mode, "graph_hybrid");
+  assert.ok(objectGraphResponse.results.some((result) => result.heading === "Endpoints > GET /api/search" && result.supporting_relations?.some((relation) => relation.predicate === "uses_l3_method" && relation.object.includes("search.searchConfigured"))));
+
+  const subjectGraphResponse = await searchConfigured(configPath, kb.id, "what methods does GET /api/search call", 5);
+  assert.equal(subjectGraphResponse.retrieval_mode, "graph_hybrid");
+  assert.ok(subjectGraphResponse.results.some((result) => result.heading === "Endpoints > GET /api/search" && result.supporting_relations?.some((relation) => relation.subject === "GET /api/search" && relation.object.includes("search.searchConfigured"))));
+
+  const shortSubjectGraphResponse = await searchConfigured(configPath, kb.id, "GET /api/search call", 5);
+  assert.equal(shortSubjectGraphResponse.retrieval_mode, "graph_hybrid");
+  assert.ok(shortSubjectGraphResponse.results.some((result) => result.heading === "Endpoints > GET /api/search" && result.score_breakdown?.graph));
+
+  const subjectDirectionDoesNotMatchObject = await searchConfigured(configPath, kb.id, "what methods does search.searchConfigured call", 5);
+  assert.equal(subjectDirectionDoesNotMatchObject.retrieval_mode, "bm25");
+  assert.ok(subjectDirectionDoesNotMatchObject.results.every((result) => !result.score_breakdown?.graph));
+
+  const objectDirectionDoesNotMatchSubject = await searchConfigured(configPath, kb.id, "what endpoints use GET /api/search", 5);
+  assert.equal(objectDirectionDoesNotMatchSubject.retrieval_mode, "bm25");
+  assert.ok(objectDirectionDoesNotMatchSubject.results.every((result) => !result.score_breakdown?.graph));
 
   const chineseGraphIntent = await searchConfigured(configPath, kb.id, "哪些接口调用 search.searchConfigured", 5);
   assert.equal(chineseGraphIntent.retrieval_mode, "bm25");
@@ -263,8 +279,11 @@ Agent Memory stores approved knowledge and retrieves it for AI review.
   assert.match(skill, /Calls L3/);
   assert.match(skill, /only recognizes English graph-intent words/);
   assert.match(skill, /Queries without one of these exact English words will not use graph relations/);
+  assert.match(skill, /subject = L2 interface/);
+  assert.match(skill, /object = L3 method/);
+  assert.match(skill, /what methods does <interface> call/);
+  assert.match(skill, /<interface> call/);
   assert.match(skill, /what endpoints use search\.searchConfigured/);
-  assert.match(skill, /which command invokes runtime\.createSkill/);
   assert.doesNotMatch(skill, /cargo run/);
   await assert.rejects(() => createSkill(configPath, kb.id, "custom"), /destination_path is required/);
 });
