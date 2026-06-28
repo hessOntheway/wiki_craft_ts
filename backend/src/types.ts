@@ -15,16 +15,6 @@ export interface KnowledgeBaseList {
   knowledge_bases: KnowledgeBaseRecord[];
 }
 
-export interface ImportLocalOutcome {
-  source_id: string;
-  source_url: string;
-  summary_path: string;
-  content_hash: string;
-  changed: boolean;
-  message: string;
-  warnings: string[];
-}
-
 export type SkillWorkflow = "search" | "author";
 
 export interface SkillCreateOutcome {
@@ -39,12 +29,11 @@ export interface WorkspacePaths {
   knowledgeBaseId?: string;
   knowledgeBaseName?: string;
   knowledgeBaseFocus?: string;
-  sourcesDir: string;
-  sourceSummariesCurrent: string;
   knowledgeCurrent: string;
-  manifestPath: string;
   searchIndexPath: string;
   searchCachePath: string;
+  searchEventsPath: string;
+  searchErrorsPath: string;
   searchQuerySessionsDir: string;
 }
 

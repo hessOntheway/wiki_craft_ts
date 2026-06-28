@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
 import { activateKnowledgeBase, createKnowledgeBase, deleteKnowledgeBase, initializeProject, listKnowledgeBases, loadGlobalConfig } from "../src/config.ts";
-import { createSkill, extractWikilinks, importLocalFile, parseVaultFrontmatter } from "../src/runtime.ts";
+import { createSkill, extractWikilinks, parseVaultFrontmatter } from "../src/runtime.ts";
 import { reindexConfigured, searchConfigured } from "../src/search.ts";
 import { routeForTest } from "../src/server.ts";
 
@@ -44,6 +44,11 @@ test("knowledge base registry create/list/activate/delete", async () => {
   const { configPath } = await fixture();
   const one = await createKnowledgeBase(configPath, { name: "Agent Memory", focus: "memory design" });
   const two = await createKnowledgeBase(configPath, { name: "Review Rules", focus: "AI review policy" });
+  assert.ok(await fs.stat(path.join(one.root, "knowledge")));
+  await assert.rejects(() => fs.stat(path.join(one.root, "knowledge", "topics")));
+  await assert.rejects(() => fs.stat(path.join(one.root, "knowledge_base.toml")));
+  await assert.rejects(() => fs.stat(path.join(one.root, "knowledge", "approved")));
+  await assert.rejects(() => fs.stat(path.join(one.root, "knowledge", "staging")));
   assert.equal((await listKnowledgeBases(configPath)).active_id, two.id);
   assert.equal((await activateKnowledgeBase(configPath, one.id)).id, one.id);
   await assert.rejects(() => deleteKnowledgeBase(configPath, one.id, "wrong"), /confirmation/);
@@ -63,53 +68,50 @@ test("init creates search-first project files", async () => {
   assert.match(config, /embedding_enabled = false/);
 });
 
-test("local import writes approved evidence and search sees it", async () => {
-  const { root, configPath } = await fixture();
+test("full import reindex writes add events and repeated reindex stays quiet", async () => {
+  const { configPath } = await fixture();
   const kb = await createKnowledgeBase(configPath, { name: "Docs", focus: "docs" });
-  const source = path.join(root, "note.md");
-  await fs.writeFile(source, "# Note\n\nImportant [[Topic]] content for AI review.");
+  await fs.writeFile(path.join(kb.root, "knowledge", "note.md"), "# Note\n\nImportant [[Topic]] content for AI review.");
 
-  const imported = await importLocalFile(configPath, kb.id, source);
-  assert.equal(imported.changed, true);
-  assert.deepEqual(imported.warnings, []);
-  assert.match(imported.summary_path, /^evidence\/source_summaries\//);
-  assert.ok(await fs.stat(path.join(kb.root, "knowledge", "approved", imported.summary_path)));
+  const status = await reindexConfigured(configPath, kb.id, true);
+  assert.equal(status.indexed_chunks, 2);
+  const eventsPath = path.join(kb.root, "runtime", "search", "events.jsonl");
+  const events = (await fs.readFile(eventsPath, "utf8")).trim().split(/\n/u).map((line) => JSON.parse(line));
+  assert.equal(events.length, 2);
+  assert.ok(events.every((event) => event.import_mode === "full"));
+  assert.ok(events.every((event) => event.action === "add"));
+  assert.ok(events.some((event) => event.page_path === "note.md"));
 
-  const again = await importLocalFile(configPath, kb.id, source);
-  assert.equal(again.changed, false);
+  await reindexConfigured(configPath, kb.id, true);
+  const repeated = (await fs.readFile(eventsPath, "utf8")).trim().split(/\n/u);
+  assert.equal(repeated.length, 2);
 
   const response = await searchConfigured(configPath, kb.id, "AI review", 5);
-  assert.equal(response.results[0].kind, "source_summary");
+  assert.equal(response.results[0].kind, "topic");
   assert.match(response.results[0].snippet, /AI review/);
   const sessionLog = await readQuerySessionLog(kb.root, null);
   const entry = sessionLog.entries.at(-1);
   assert.ok(entry);
-  assert.equal(sessionLog.latest_log_at_unix_ms, entry.ts_unix_ms);
-  assert.equal(sessionLog.latest_log_at_iso, entry.ts_iso);
   assert.equal(sessionLog.session_id, null);
   assert.equal(sessionLog.session_missing, true);
   assert.equal(entry.query, "AI review");
 });
 
-test("validated import reports authoring warnings and preserves frontmatter signals", async () => {
-  const { root, configPath } = await fixture();
-  const kb = await createKnowledgeBase(configPath, { name: "Authoring", focus: "authoring" });
-  const missing = path.join(root, "missing.md");
-  await fs.writeFile(missing, "# Loose Report\n\nA long mixed note without the recommended sections.");
+test("incremental reindex logs update and delete events", async () => {
+  const { configPath } = await fixture();
+  const kb = await createKnowledgeBase(configPath, { name: "Incremental", focus: "events" });
+  const topic = path.join(kb.root, "knowledge", "memory.md");
+  await fs.writeFile(topic, "# Agent Memory\n\nHybrid retrieval and BM25 index design.");
+  await reindexConfigured(configPath, kb.id, true);
 
-  const imported = await importLocalFile(configPath, kb.id, missing, true);
-  assert.ok(imported.warnings.some((warning) => warning.includes("missing Summary")));
-  const generated = await fs.readFile(path.join(kb.root, "knowledge", "approved", imported.summary_path), "utf8");
-  assert.match(generated, /tags: \["imported"\]/);
+  await fs.writeFile(topic, "# Agent Memory\n\nHybrid retrieval, BM25 index design, and graph updates.");
+  await reindexConfigured(configPath, kb.id, true);
+  await fs.unlink(topic);
+  await reindexConfigured(configPath, kb.id, true);
 
-  const structured = path.join(root, "structured.md");
-  await fs.writeFile(structured, "---\ntitle: \"Payment Review\"\naliases: [payments]\ntags: [business-context, review]\n---\n\n# Payment Review\n\n## Summary\n\nPayment risk.\n\n## Exported API\n\n### `reviewPayment(input)`\n\n- Purpose: Review a payment.\n- Parameters:\n  - `input`: Payment input.\n- Returns: Payment review result.\n");
-  const structuredImport = await importLocalFile(configPath, kb.id, structured, true);
-  assert.deepEqual(structuredImport.warnings, []);
-  const structuredGenerated = await fs.readFile(path.join(kb.root, "knowledge", "approved", structuredImport.summary_path), "utf8");
-  assert.match(structuredGenerated, /title: "Payment Review"/);
-  assert.match(structuredGenerated, /aliases: \["payments"\]/);
-  assert.match(structuredGenerated, /tags: \["business-context", "review"\]/);
+  const events = (await fs.readFile(path.join(kb.root, "runtime", "search", "events.jsonl"), "utf8")).trim().split(/\n/u).map((line) => JSON.parse(line));
+  assert.ok(events.some((event) => event.import_mode === "incremental" && event.action === "update" && event.page_path === "memory.md"));
+  assert.ok(events.some((event) => event.import_mode === "incremental" && event.action === "delete" && event.page_path === "memory.md"));
 });
 
 test("frontmatter parsing and wikilinks", () => {
@@ -122,7 +124,7 @@ test("frontmatter parsing and wikilinks", () => {
 test("search returns bm25 results with clamped top_k", async () => {
   const { configPath } = await fixture();
   const kb = await createKnowledgeBase(configPath, { name: "Searchable", focus: "search" });
-  await fs.writeFile(path.join(kb.root, "knowledge", "approved", "topics", "memory.md"), "---\ntitle: \"Memory\"\ntags: [agent]\n---\n\n# Agent Memory\n\nHybrid retrieval and BM25 index design.");
+  await fs.writeFile(path.join(kb.root, "knowledge", "memory.md"), "---\ntitle: \"Memory\"\ntags: [agent]\n---\n\n# Agent Memory\n\nHybrid retrieval and BM25 index design.");
   const response = await searchConfigured(configPath, kb.id, "BM25 retrieval", 99, "unit-session");
   assert.equal(response.top_k, 20);
   assert.equal(response.retrieval_mode, "bm25");
@@ -170,7 +172,7 @@ test("search returns bm25 results with clamped top_k", async () => {
 test("code-model reindex chunks strict layers and derives graph edges", async () => {
   const { configPath } = await fixture();
   const kb = await createKnowledgeBase(configPath, { name: "Graphable", focus: "graph search" });
-  const codeModel = path.join(kb.root, "knowledge", "approved", "topics", "code-model");
+  const codeModel = path.join(kb.root, "knowledge");
   await fs.mkdir(codeModel, { recursive: true });
   await fs.writeFile(path.join(codeModel, "index.md"), `# Project Index
 
@@ -186,12 +188,12 @@ PROJECT_OVERVIEW_ONLY Project summary.
 
 ## Capabilities
 
-### Approved Search
+### Knowledge Search
 
-- Business goal: Search approved knowledge.
-- Business context: Review agents need approved retrieval before answering.
+- Business goal: Search knowledge.
+- Business context: Review agents need knowledge retrieval before answering.
 - Business domains: Search, indexing.
-- Expected outcome: Relevant approved chunks are returned.
+- Expected outcome: Relevant knowledge chunks are returned.
 - Drill down to L2:
   - [HTTP Endpoints](l2-http-endpoints.md): \`GET /api/search\`
 
@@ -214,12 +216,12 @@ HTTP API summary.
 
 ### \`GET /api/search\`
 
-- Business goal: Search approved knowledge.
+- Business goal: Search knowledge.
 - Business rules:
   - Query text must not be empty.
 - Business constraints:
-  - Results come from approved knowledge.
-- Expected outcome: Ranked approved search results are returned.
+  - Results come from knowledge.
+- Expected outcome: Ranked search results are returned.
 - Entry parameters:
   - \`knowledge_base\` (\`query\`, required): Knowledge base ID.
   - \`query\` (\`query\`, required): Search text.
@@ -249,11 +251,11 @@ Search module summary.
 
 ### \`searchConfigured(configPath, knowledgeBaseId, query, topK, requireExplicitKnowledgeBase?)\`
 
-- Business responsibility: Search approved knowledge.
+- Business responsibility: Search knowledge.
 - Business rules:
   - Query text must not be empty.
 - Business constraints:
-  - Only approved knowledge is searched.
+  - Only knowledge is searched.
 - Expected outcome: Structured search results are returned.
 - Parameters:
   - \`query\`: Search text.
@@ -265,7 +267,7 @@ Search module summary.
 - Business rules:
   - A knowledge base must be selected.
 - Business constraints:
-  - Reindexing reflects approved files.
+  - Reindexing reflects knowledge files.
 - Expected outcome: Index status is returned.
 - Parameters:
   - \`knowledgeBaseId\`: Knowledge base ID.
@@ -281,7 +283,7 @@ This old-format page should not become a code-model chunk.
 
 ### \`legacySearch(query)\`
 
-- Purpose: Search approved knowledge.
+- Purpose: Search knowledge.
 - Parameters:
   - \`query\`: Search text.
 - Returns: Search response.
@@ -328,13 +330,15 @@ This format guide should not become a search chunk.
   const dbPath = path.join(kb.root, "runtime", "search", "index.sqlite");
   const db = new DatabaseSync(dbPath);
   try {
-    const codeChunks = db.prepare("SELECT chunk_id, heading FROM search_chunks WHERE chunk_id LIKE 'topics/code-model/%' ORDER BY chunk_id").all() as Array<{ chunk_id: string; heading: string }>;
-    assert.equal(codeChunks.length, 6);
-    assert.ok(codeChunks.some((chunk) => chunk.heading === "Approved Search"));
+    const codeChunks = db.prepare("SELECT chunk_id, heading FROM search_chunks WHERE chunk_id LIKE '%' ORDER BY chunk_id").all() as Array<{ chunk_id: string; heading: string }>;
+    assert.equal(codeChunks.length, 8);
+    assert.ok(codeChunks.some((chunk) => chunk.heading === "Knowledge Search"));
     assert.ok(codeChunks.some((chunk) => chunk.heading === "Endpoints > GET /api/search"));
     assert.ok(codeChunks.some((chunk) => chunk.heading === "Exported API > searchConfigured(configPath, knowledgeBaseId, query, topK, requireExplicitKnowledgeBase?)"));
-    const projectIndex = db.prepare("SELECT COUNT(*) AS count FROM search_chunks WHERE body LIKE '%PROJECT_OVERVIEW_ONLY%' OR body LIKE '%PROJECT_INDEX_ONLY%' OR body LIKE '%old-format page%' OR chunk_id IN ('topics/code-model/modeling-guide.md#0', 'topics/code-model/index.md#0')").get() as { count: number };
-    assert.equal(projectIndex.count, 0);
+    const excluded = db.prepare("SELECT COUNT(*) AS count FROM search_chunks WHERE body LIKE '%PROJECT_OVERVIEW_ONLY%' OR body LIKE '%old-format page%' OR chunk_id = 'modeling-guide.md#0'").get() as { count: number };
+    assert.equal(excluded.count, 0);
+    const projectIndex = db.prepare("SELECT COUNT(*) AS count FROM search_chunks WHERE body LIKE '%PROJECT_INDEX_ONLY%' AND chunk_id LIKE 'index.md#%'").get() as { count: number };
+    assert.equal(projectIndex.count, 1);
     const l1 = db.prepare("SELECT COUNT(*) AS count FROM search_graph_edges WHERE predicate = 'drills_down_to_l2'").get() as { count: number };
     assert.equal(l1.count, 2);
     const l2 = db.prepare("SELECT COUNT(*) AS count FROM search_graph_edges WHERE predicate = 'uses_l3_method'").get() as { count: number };
@@ -369,29 +373,29 @@ test("single app routes expose only lightweight API", async () => {
 test("skill generation uses fixed CLI search command", async () => {
   const { root, configPath } = await fixture();
   const kb = await createKnowledgeBase(configPath, { name: "Agent Memory", focus: "Agent memory research" });
-  await fs.writeFile(path.join(kb.root, "knowledge", "approved", "topics", "retrieval.md"), "---\ntitle: \"Retrieval Patterns\"\naliases: [lookup]\ntags: [memory]\n---\n\n# Retrieval Patterns\n");
-  const codeModel = path.join(kb.root, "knowledge", "approved", "topics", "code-model");
+  await fs.writeFile(path.join(kb.root, "knowledge", "retrieval.md"), "---\ntitle: \"Retrieval Patterns\"\naliases: [lookup]\ntags: [memory]\n---\n\n# Retrieval Patterns\n");
+  const codeModel = path.join(kb.root, "knowledge");
   await fs.mkdir(codeModel, { recursive: true });
   await fs.writeFile(path.join(codeModel, "index.md"), `# Agent Memory
 
 ## Summary
 
-Agent Memory stores approved knowledge and retrieves it for AI review.
+Agent Memory stores knowledge and retrieves it for AI review.
 `);
   await fs.writeFile(path.join(codeModel, "l1-agent-memory.md"), `# Agent Memory Code Model
 
 ## Summary
 
-Agent Memory stores approved knowledge and retrieves it for AI review.
+Agent Memory stores knowledge and retrieves it for AI review.
 
 ## Capabilities
 
 ### Retrieval
 
 - Business goal: Retrieve knowledge.
-- Business context: Review agents need approved retrieval context.
+- Business context: Review agents need knowledge retrieval context.
 - Business domains: Retrieval.
-- Expected outcome: Search interfaces expose approved knowledge.
+- Expected outcome: Search interfaces expose knowledge.
 - Drill down to L2:
   - [Search Interfaces](l2-search.md): \`search\`
 `);
@@ -413,9 +417,9 @@ Agent Memory stores approved knowledge and retrieves it for AI review.
   assert.match(skill, /Replace `<query>` with a concise English natural-language query and `<session-id>`/);
   assert.match(skill, /Project Index/);
   assert.match(skill, /read the project index file directly first, then run search/);
-  assert.match(skill, /topics\/code-model\/index\.md/);
+  assert.match(skill, /knowledge\/index\.md/);
   assert.match(skill, /Project index status: available/);
-  assert.doesNotMatch(skill, /Agent Memory stores approved knowledge and retrieves it for AI review/);
+  assert.doesNotMatch(skill, /Agent Memory stores knowledge and retrieves it for AI review/);
   assert.match(skill, /project index -> L1 capability -> L2 interface -> L3 exported API/);
   assert.match(skill, /Drill down to L2/);
   assert.match(skill, /Calls L3/);
@@ -448,8 +452,10 @@ test("author skill generation requires repository modeling guide", async () => {
   assert.doesNotMatch(skill, /Forbidden Sections/);
   assert.doesNotMatch(skill, /Code\/Workflow Map/);
   assert.doesNotMatch(skill, /Review Guidance/);
-  assert.match(skill, /import-local --knowledge-base/);
-  assert.match(skill, /--validate/);
+  assert.match(skill, /reindex --knowledge-base/);
+  assert.match(skill, /knowledge\/l1-\*\.md/);
+  assert.doesNotMatch(skill, /knowledge\/topics/);
+  assert.doesNotMatch(skill, /import-local --knowledge-base/);
 });
 
 test("search index persists embeddings in sqlite and lexical-only clears them", async () => {
@@ -457,7 +463,7 @@ test("search index persists embeddings in sqlite and lexical-only clears them", 
   const configPath = path.join(root, "wiki_craft.toml");
   await fs.writeFile(configPath, `[runtime]\nroot = ".wiki_craft"\n\n[search]\nembedding_enabled = true\nollama_endpoint = "http://ollama.test"\nembedding_model = "test-model"\nembedding_dimensions = 3\nembedding_timeout_seconds = 1\n`);
   const kb = await createKnowledgeBase(configPath, { name: "Vectors", focus: "vectors" });
-  await fs.writeFile(path.join(kb.root, "knowledge", "approved", "topics", "vector.md"), "---\ntitle: \"向量数据库\"\ntags: [检索]\n---\n\n# 向量数据库\n\n中文 向量 数据库 检索.");
+  await fs.writeFile(path.join(kb.root, "knowledge", "vector.md"), "---\ntitle: \"向量数据库\"\ntags: [检索]\n---\n\n# 向量数据库\n\n中文 向量 数据库 检索.");
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => new Response(JSON.stringify({ embeddings: [[1, 0, 0]] }), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
   try {
@@ -490,7 +496,7 @@ test("openai-compatible embedding provider indexes vectors", async () => {
   const configPath = path.join(root, "wiki_craft.toml");
   await fs.writeFile(configPath, `[runtime]\nroot = ".wiki_craft"\n\n[search]\nembedding_provider = "openai_compatible"\nembedding_endpoint = "http://embeddings.test/openai/v1"\nembedding_api_key = "test-key"\nembedding_model = "embedding-v1"\nembedding_dimensions = 3\nembedding_timeout_seconds = 1\n`);
   const kb = await createKnowledgeBase(configPath, { name: "Hosted Vectors", focus: "hosted vectors" });
-  await fs.writeFile(path.join(kb.root, "knowledge", "approved", "topics", "hosted.md"), "---\ntitle: \"Hosted Embeddings\"\ntags: [vectors]\n---\n\n# Hosted Embeddings\n\nRemote OpenAI compatible embedding APIs.");
+  await fs.writeFile(path.join(kb.root, "knowledge", "hosted.md"), "---\ntitle: \"Hosted Embeddings\"\ntags: [vectors]\n---\n\n# Hosted Embeddings\n\nRemote OpenAI compatible embedding APIs.");
   const originalFetch = globalThis.fetch;
   const calls: Array<{ url: string; authorization?: string | null }> = [];
   globalThis.fetch = (async (input, init) => {

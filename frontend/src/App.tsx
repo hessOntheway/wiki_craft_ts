@@ -3,8 +3,6 @@ import {
   Check,
   CircleAlert,
   Database,
-  Download,
-  FolderOpen,
   LoaderCircle,
   Plus,
   RefreshCw,
@@ -30,7 +28,7 @@ interface KnowledgeBaseListResponse {
 
 interface SearchResult {
   path: string;
-  kind: "index" | "topic" | "source_summary";
+  kind: "index" | "topic";
   title?: string | null;
   heading?: string | null;
   score: number;
@@ -73,16 +71,6 @@ interface SearchIndexStatus {
   warning?: string | null;
 }
 
-interface ImportLocalOutcome {
-  source_id: string;
-  source_url: string;
-  summary_path: string;
-  content_hash: string;
-  changed: boolean;
-  message: string;
-  warnings: string[];
-}
-
 interface SkillCreateOutcome {
   skill_name: string;
   skill_path: string;
@@ -107,7 +95,6 @@ export function App() {
   const [newName, setNewName] = useState("");
   const [newFocus, setNewFocus] = useState("");
   const [deleteConfirmation, setDeleteConfirmation] = useState("");
-  const [importPath, setImportPath] = useState("");
   const [skillTarget, setSkillTarget] = useState<SkillTarget>("codex");
   const [skillWorkflow, setSkillWorkflow] = useState<SkillWorkflow>("search");
   const [skillDestination, setSkillDestination] = useState("");
@@ -205,26 +192,6 @@ export function App() {
     }
   };
 
-  const chooseImportFile = async () => {
-    if (!window.__TAURI_INTERNALS__) return;
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const chosen = await open({ multiple: false, directory: false });
-    if (typeof chosen === "string") setImportPath(chosen);
-  };
-
-  const importLocal = async () => withAction(async () => {
-    if (!selected) return;
-    const outcome = await requestJson<ImportLocalOutcome>(`${apiBaseUrl}/api/knowledge-bases/${encodeURIComponent(selected.id)}/import-local`, {
-      method: "POST",
-      body: { path: importPath.trim(), validate: true },
-    });
-    setImportPath("");
-    setSearchResponse(null);
-    setSearched(false);
-    const warningText = outcome.warnings.length ? ` (${outcome.warnings.length} warning${outcome.warnings.length === 1 ? "" : "s"})` : "";
-    return `${outcome.changed ? "Imported" : "Already current"}: ${outcome.summary_path}${warningText}`;
-  });
-
   const createSkill = async () => withAction(async () => {
     if (!selected) return;
     const outcome = await requestJson<SkillCreateOutcome>(`${apiBaseUrl}/api/knowledge-bases/${encodeURIComponent(selected.id)}/skill`, {
@@ -261,7 +228,7 @@ export function App() {
               ))}
             </select>
           </label>
-          <p className="knowledge-base-focus">{selected?.focus || "Create or select an approved knowledge vault."}</p>
+          <p className="knowledge-base-focus">{selected?.focus || "Create or select a knowledge vault."}</p>
         </section>
 
         <section className="knowledge-base-panel">
@@ -278,21 +245,6 @@ export function App() {
 
         <section className="knowledge-base-panel">
           <span className="section-title">Tools</span>
-          <form className="knowledge-base-form" onSubmit={(event) => { event.preventDefault(); void importLocal(); }}>
-            <div className="inline-field">
-              <input value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder="Local file path" />
-              {Boolean(window.__TAURI_INTERNALS__) && (
-                <button className="icon-button" type="button" onClick={() => void chooseImportFile()} title="Choose file">
-                  <FolderOpen size={16} />
-                </button>
-              )}
-            </div>
-            <button className="secondary-button" type="submit" disabled={loading || !selected || !importPath.trim()}>
-              <Download size={16} />
-              Import
-            </button>
-          </form>
-
           <form className="knowledge-base-form" onSubmit={(event) => { event.preventDefault(); void createSkill(); }}>
             <select value={skillTarget} onChange={(event) => setSkillTarget(event.target.value as SkillTarget)}>
               <option value="codex">Codex</option>
@@ -327,7 +279,7 @@ export function App() {
         <header className="workspace-header">
           <div>
             <p className="eyebrow">{selected?.name || "No Knowledge Base"}</p>
-            <h2>Approved Knowledge Search</h2>
+            <h2>Knowledge Search</h2>
           </div>
         </header>
 
@@ -335,7 +287,7 @@ export function App() {
           <form className="search-form" onSubmit={(event) => { event.preventDefault(); void runSearch(); }}>
             <label className="search-field">
               <span>Query</span>
-              <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search approved knowledge" />
+              <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search knowledge" />
             </label>
             <label className="top-k-field">
               <span>Top K</span>
@@ -353,8 +305,8 @@ export function App() {
 
           <div className="search-results">
             {searchResponse?.results.map((result, index) => <SearchResultCard result={result} index={index} key={`${result.path}-${result.line_start}`} />)}
-            {!searchLoading && searched && searchResponse?.results.length === 0 && <section className="empty-state"><Search size={28} /><p>No approved knowledge matched this query.</p></section>}
-            {!searchLoading && !searched && <section className="empty-state"><Search size={28} /><p>Choose a knowledge base and search its approved vault.</p></section>}
+            {!searchLoading && searched && searchResponse?.results.length === 0 && <section className="empty-state"><Search size={28} /><p>No knowledge matched this query.</p></section>}
+            {!searchLoading && !searched && <section className="empty-state"><Search size={28} /><p>Choose a knowledge base and search its vault.</p></section>}
           </div>
         </section>
       </main>

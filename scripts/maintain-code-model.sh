@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
-GUIDE=".wiki_craft/knowledge_bases/wiki-craft-1781418122616/knowledge/approved/topics/code-model/modeling-guide.md"
-MODEL_DIR=".wiki_craft/knowledge_bases/wiki-craft-1781418122616/knowledge/approved/topics/code-model"
+GUIDE="docs/code-model/modeling-guide.md"
+MODEL_DIR=".wiki_craft/knowledge_bases/wiki-craft-1781418122616/knowledge"
 
 if [[ "${SKIP_CODE_MODEL_HOOK:-}" == "1" ]]; then
   echo "code-model hook skipped: SKIP_CODE_MODEL_HOOK=1"
@@ -32,11 +32,12 @@ fi
 PROMPT="$(cat <<'PROMPT_EOF'
 You are maintaining the backend three-layer code model for this repository.
 
-Read .wiki_craft/knowledge_bases/wiki-craft-1781418122616/knowledge/approved/topics/code-model/modeling-guide.md first and follow it exactly.
+Read docs/code-model/modeling-guide.md first and follow it exactly.
 
 Scope:
 - Inspect staged backend changes under backend/src/**.
-- Update only .wiki_craft/knowledge_bases/wiki-craft-1781418122616/knowledge/approved/topics/code-model/**.
+- Update only .wiki_craft/knowledge_bases/wiki-craft-1781418122616/knowledge/*.md.
+- Do not create topics/, code-model/, approved/, staging/, or other nested knowledge directories.
 - Do not edit backend source code, frontend code, Tauri code, README files, package files, or git metadata.
 - Preserve the three-layer model:
   - L1 backend capability summary
@@ -50,11 +51,11 @@ Refresh the code model so it matches the currently staged backend changes. If no
 PROMPT_EOF
 )"
 
-echo "code-model hook: running Codex to refresh .wiki_craft approved code-model topics..."
+echo "code-model hook: running Codex to refresh .wiki_craft knowledge files..."
 codex exec \
   --cd "$ROOT" \
   --sandbox workspace-write \
   --ask-for-approval never \
   "$PROMPT"
 
-echo "code-model hook: refreshed local KB code model at $MODEL_DIR"
+echo "code-model hook: refreshed local KB knowledge at $MODEL_DIR"

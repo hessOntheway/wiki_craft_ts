@@ -1,25 +1,23 @@
 # Wiki Craft Schema
 
-This file is the operating contract for approved knowledge used by Wiki Craft search and authoring.
+This file is the operating contract for knowledge used by Wiki Craft search and authoring.
 
 ## Knowledge Base Location
 
-AI coding tools should read approved knowledge from:
+AI coding tools should read and write knowledge under:
 
-- `.wiki_craft/knowledge_bases/{id}/knowledge/approved/index.md`
-- `.wiki_craft/knowledge_bases/{id}/knowledge/approved/topics/*.md`
-- `.wiki_craft/knowledge_bases/{id}/knowledge/approved/evidence/source_summaries/`
+- `.wiki_craft/knowledge_bases/{id}/knowledge/index.md`
+- `.wiki_craft/knowledge_bases/{id}/knowledge/*.md`
 
 ## Rules
 
-- Treat approved Markdown as authoritative for the selected knowledge base.
-- Local imports are considered user-approved evidence and are written directly under approved evidence.
+- Treat knowledge Markdown as authoritative for the selected knowledge base.
 - Prefer concise Markdown pages with links back to source URLs when available.
 - Mark conflicts, uncertainty, and changed claims explicitly.
 
-## Approved Topic Authoring Contract
+## Topic Authoring Contract
 
-Use this frontmatter shape for topic and evidence-summary Markdown:
+Use this frontmatter shape for topic Markdown when metadata is useful:
 
 ```yaml
 ---

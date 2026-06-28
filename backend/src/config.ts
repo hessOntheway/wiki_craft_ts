@@ -8,7 +8,6 @@ const DEFAULT_CONFIG_PATH = "wiki_craft.toml";
 const DEFAULT_RUNTIME_ROOT = ".wiki_craft";
 const KB_DIR = "knowledge_bases";
 const REGISTRY_FILE = "registry.json";
-const KB_CONFIG_FILE = "knowledge_base.toml";
 const DEFAULT_SCHEMA_PATH = "WIKI_CRAFT.md";
 
 type TomlValue = string | number | boolean | string[] | Record<string, unknown> | TomlValue[];
@@ -47,7 +46,6 @@ export async function initializeProject(configPath: string): Promise<{ config_pa
     await writeJson(registry, { schema_version: 1, active_id: null, knowledge_bases: [] });
     created.push(registry);
   }
-  await ensureDir(path.join(config.runtime.root, "runtime"));
   created.push(config.runtime.root);
   return { config_path: absolute, schema_path: DEFAULT_SCHEMA_PATH, runtime_root: config.runtime.root, created, existing };
 }
@@ -66,13 +64,10 @@ export async function createKnowledgeBase(configPath: string, input: { name: str
   const root = path.join(knowledgeBasesRoot(config), id);
   const record: KnowledgeBaseRecord = { id, name, focus, root, created_at_unix_ms: now, updated_at_unix_ms: now };
 
-  await ensureDir(path.join(root, "knowledge", "approved", "topics"));
-  await ensureDir(path.join(root, "knowledge", "approved", "evidence", "source_summaries"));
-  await ensureDir(path.join(root, "knowledge", "approved", "evidence", "sources"));
-  await ensureDir(path.join(root, "runtime"));
-  await fs.writeFile(path.join(root, KB_CONFIG_FILE), knowledgeBaseToml(name, focus));
+  await ensureDir(path.join(root, "knowledge"));
+  await ensureDir(path.join(root, "runtime", "search"));
   await fs.writeFile(
-    path.join(root, "knowledge", "approved", "index.md"),
+    path.join(root, "knowledge", "index.md"),
     `---\ntitle: "${escapeTomlString(name)}"\naliases: []\ntags: [index]\nsource_ids: []\nsource_urls: []\nversion_hashes: []\n---\n\n# ${name}\n\nFocus: ${focus}\n`,
   );
 
@@ -128,11 +123,10 @@ export async function loadConfigForKnowledgeBase(configPath: string, id?: string
   if (!selectedId) return config;
   const record = registry.knowledge_bases.find((kb) => kb.id === selectedId);
   if (!record) throw new Error(`knowledge base not found in registry: ${selectedId}`);
-  const kbToml = await parseTomlFile(path.join(record.root, KB_CONFIG_FILE));
   config.knowledge_base = {
     id: record.id,
-    name: String(kbToml.name ?? record.name),
-    focus: String(kbToml.focus ?? record.focus),
+    name: record.name,
+    focus: record.focus,
     root: record.root,
   };
   return config;
@@ -164,28 +158,25 @@ export async function loadGlobalConfig(configPath: string): Promise<AppConfig> {
 
 export function workspacePaths(config: AppConfig): WorkspacePaths {
   const root = config.knowledge_base?.root ?? config.runtime.root;
-  const approvedKnowledge = path.join(root, "knowledge", "approved");
-  const approvedEvidence = path.join(approvedKnowledge, "evidence");
+  const knowledge = path.join(root, "knowledge");
+  const searchRoot = path.join(root, "runtime", "search");
   return {
     root,
     knowledgeBaseId: config.knowledge_base?.id,
     knowledgeBaseName: config.knowledge_base?.name,
     knowledgeBaseFocus: config.knowledge_base?.focus,
-    sourcesDir: path.join(approvedEvidence, "sources"),
-    sourceSummariesCurrent: path.join(approvedEvidence, "source_summaries"),
-    knowledgeCurrent: approvedKnowledge,
-    manifestPath: path.join(approvedEvidence, "sources", "manifest.json"),
-    searchIndexPath: path.join(root, "runtime", "search", "index.sqlite"),
-    searchCachePath: path.join(root, "runtime", "search", "index.json"),
-    searchQuerySessionsDir: path.join(root, "runtime", "search", "sessions"),
+    knowledgeCurrent: knowledge,
+    searchIndexPath: path.join(searchRoot, "index.sqlite"),
+    searchCachePath: path.join(searchRoot, "index.json"),
+    searchEventsPath: path.join(searchRoot, "events.jsonl"),
+    searchErrorsPath: path.join(searchRoot, "errors.jsonl"),
+    searchQuerySessionsDir: path.join(searchRoot, "sessions"),
   };
 }
 
 export async function ensureWorkspace(paths: WorkspacePaths): Promise<void> {
   await Promise.all([
     ensureDir(paths.root),
-    ensureDir(paths.sourcesDir),
-    ensureDir(paths.sourceSummariesCurrent),
     ensureDir(paths.knowledgeCurrent),
     ensureDir(path.dirname(paths.searchIndexPath)),
   ]);
@@ -318,14 +309,10 @@ function ensureDeletableRoot(root: string, parent: string): void {
   if (!fssync.existsSync(resolved)) return;
 }
 
-function knowledgeBaseToml(name: string, focus: string): string {
-  return `name = "${escapeTomlString(name)}"\nfocus = "${escapeTomlString(focus)}"\n`;
-}
-
 function defaultConfigToml(): string {
   return `# Wiki Craft configuration.\n\n[runtime]\nroot = ".wiki_craft"\n\n[search]\n# Embeddings are optional. Use "none" for BM25/graph-only search, "ollama"\n# for a local Ollama embedder, or "openai_compatible" for a /v1/embeddings API.\nembedding_enabled = false\nembedding_provider = "none"\nembedding_endpoint = ""\nembedding_api_key = ""\nollama_endpoint = "http://127.0.0.1:11434"\nembedding_model = "bge-m3"\nembedding_dimensions = 1024\nembedding_timeout_seconds = 10\n`;
 }
 
 function defaultSchemaMarkdown(): string {
-  return `# Wiki Craft Schema\n\nThis file is the operating contract for approved knowledge used by Wiki Craft search and authoring.\n\n## Knowledge Base Location\n\nAI coding tools should read approved knowledge from:\n\n- \`.wiki_craft/knowledge_bases/{id}/knowledge/approved/index.md\`\n- \`.wiki_craft/knowledge_bases/{id}/knowledge/approved/topics/*.md\`\n- \`.wiki_craft/knowledge_bases/{id}/knowledge/approved/evidence/source_summaries/\`\n\n## Rules\n\n- Treat approved Markdown as authoritative for the selected knowledge base.\n- Local imports are considered user-approved evidence and are written directly under approved evidence.\n- Prefer concise Markdown pages with links back to source URLs when available.\n- Mark conflicts, uncertainty, and changed claims explicitly.\n\n## Approved Topic Authoring Contract\n\nUse this frontmatter shape for topic and evidence-summary Markdown:\n\n\`\`\`yaml\n---\ntitle: \"<stable topic name>\"\naliases: []\ntags: []\nsource_ids: []\nsource_urls: []\nversion_hashes: []\n---\n\`\`\`\n\nRecommended topic sections:\n\n\`\`\`md\n# <stable topic name>\n\n## Summary\n\n## Business Context\n\n## Code/Workflow Map\n\n## Review Guidance\n\n## Relations\n\n## Evidence\n\n## Conflicts & Uncertainties\n\`\`\`\n\nChunk quality rules:\n\n- Keep one page focused on one stable topic, workflow, business rule, integration, or review risk.\n- Avoid long mixed reports; split unrelated concepts into separate topic pages.\n- Put important searchable concepts in headings, tags, aliases, wikilinks, or concise paragraphs.\n- Preserve code evidence as file paths, symbols, endpoints, config keys, source URLs, or version notes.\n- Tags are authored or normalized before indexing; reindex does not infer new tags.\n`;
+  return `# Wiki Craft Schema\n\nThis file is the operating contract for knowledge used by Wiki Craft search and authoring.\n\n## Knowledge Base Location\n\nAI coding tools should read and write knowledge under:\n\n- \`.wiki_craft/knowledge_bases/{id}/knowledge/index.md\`\n- \`.wiki_craft/knowledge_bases/{id}/knowledge/*.md\`\n\n## Rules\n\n- Treat Markdown under the selected knowledge base's \`knowledge/\` directory as authoritative.\n- Prefer concise Markdown pages with links back to source URLs when available.\n- Mark conflicts, uncertainty, and changed claims explicitly.\n\n## Topic Authoring Contract\n\nUse this frontmatter shape for topic Markdown when metadata is useful:\n\n\`\`\`yaml\n---\ntitle: \"<stable topic name>\"\naliases: []\ntags: []\nsource_ids: []\nsource_urls: []\nversion_hashes: []\n---\n\`\`\`\n\nRecommended topic sections:\n\n\`\`\`md\n# <stable topic name>\n\n## Summary\n\n## Business Context\n\n## Code/Workflow Map\n\n## Review Guidance\n\n## Relations\n\n## Evidence\n\n## Conflicts & Uncertainties\n\`\`\`\n\nChunk quality rules:\n\n- Keep one page focused on one stable topic, workflow, business rule, integration, or review risk.\n- Avoid long mixed reports; split unrelated concepts into separate pages.\n- Put important searchable concepts in headings, tags, aliases, wikilinks, or concise paragraphs.\n- Preserve code evidence as file paths, symbols, endpoints, config keys, source URLs, or version notes.\n- Tags are authored or normalized before indexing; reindex does not infer new tags.\n`;
 }

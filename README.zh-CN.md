@@ -2,17 +2,17 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-Wiki Craft TS 是一个 TypeScript/Tauri 桌面与 CLI 项目，用来检索已经批准的 Markdown-first 业务知识。项目现在刻意保持很小：一个本地后端服务、一个 GUI、一个 CLI，以及一套能被 coding agent 查询的 approved knowledge 布局。
+Wiki Craft TS 是一个 TypeScript/Tauri 桌面与 CLI 项目，用来检索 Markdown-first 业务知识。项目现在刻意保持很小：一个本地后端服务、一个 GUI、一个 CLI，以及一套能被 coding agent 查询的 knowledge 布局。
 
 ## 项目做什么
 
 - 在 `.wiki_craft/knowledge_bases/` 下管理多个命名知识库。
-- 使用 SQLite FTS5 BM25、graph metadata 和可选 embedding 检索 approved Markdown。
-- 将本地文件直接导入 approved evidence。
+- 使用 SQLite FTS5 BM25、graph metadata 和可选 embedding 检索 knowledge Markdown。
+- 生成 authoring skill，让 agent 直接维护所选知识库的 knowledge 文件。
 - 生成 Codex/Claude/custom skill，让 agent 通过 Wiki Craft CLI 查询知识库。
 - 作为单个桌面应用运行：主屏是搜索，侧边栏提供轻量管理。
 
-Wiki Craft 不再负责 LLM 生成知识、candidate staging、diff review 或 code-analysis agent。本地导入被视为用户主动批准的 evidence。
+Wiki Craft 不再负责 candidate staging 或单独审批流。所选知识库 `knowledge/` 目录下的 Markdown 是事实源。
 
 ## 目录地图
 
@@ -21,8 +21,8 @@ backend/src/
   cli.ts        npm CLI 命令入口
   server.ts     单一本地 HTTP API
   config.ts     wiki_craft.toml、registry、知识库配置和路径
-  runtime.ts    本地导入、skill 导出、Markdown frontmatter helpers
-  search.ts     approved vault 检索、SQLite FTS5、可选 embedding
+  runtime.ts    skill 导出、Markdown frontmatter helpers
+  search.ts     knowledge vault 检索、SQLite FTS5、可选 embedding
   types.ts      共享公开契约
   util.ts       文件系统、hash、路径、TOML、Markdown 小工具
 
@@ -45,15 +45,6 @@ npm run wiki-craft -- knowledge-base create \
   --focus "Business context for AI code review"
 ```
 
-导入本地 approved evidence：
-
-```bash
-npm run wiki-craft -- import-local \
-  --knowledge-base <knowledge_base_id> \
-  --file /path/to/business-context.md \
-  --validate
-```
-
 检索：
 
 ```bash
@@ -73,7 +64,7 @@ npm run wiki-craft -- skill create \
   --workflow search
 ```
 
-生成给外部 AI 使用的代码分析/知识生产 skill：
+生成给外部 AI 使用的代码分析/知识生产 skill，让它直接写入 knowledge 文件并 reindex：
 
 ```bash
 npm run wiki-craft -- skill create \
@@ -129,30 +120,28 @@ embedding_dimensions = 1024
 npm run wiki-craft -- reindex --knowledge-base <knowledge_base_id>
 ```
 
-Approved Markdown 是权威来源。Reindex 会扫描所有现有 chunk，并把缺失或过期的 embedding blob 写入 `runtime/search/index.sqlite`。
+Knowledge Markdown 是权威来源。Reindex 会扫描所有现有 chunk，写入 chunk 级 add/update/delete event，并把缺失或过期的 embedding blob 写入 `runtime/search/index.sqlite`。
 
 ## 磁盘模型
 
-Approved Markdown 是权威来源：
+Knowledge Markdown 是权威来源：
 
 ```text
 .wiki_craft/
   knowledge_bases/
     registry.json
     {id}/
-      knowledge_base.toml
       knowledge/
-        approved/
-          index.md
-          topics/*.md
-          evidence/source_summaries/*.md
-          evidence/sources/manifest.json
+        index.md
+        *.md
       runtime/
         search/index.sqlite
         search/index.json
+        search/events.jsonl
+        search/errors.jsonl
 ```
 
-Search 只读取 `knowledge/approved`。检索索引是派生产物，可重建：
+Search 只读取 `knowledge`。检索索引和 event log 是派生产物，可重建：
 
 ```bash
 npm run wiki-craft -- reindex --knowledge-base <knowledge_base_id> --lexical-only

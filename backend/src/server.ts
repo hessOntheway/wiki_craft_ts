@@ -77,10 +77,6 @@ async function route(request: http.IncomingMessage, url: URL): Promise<unknown> 
   if (method === "GET" && url.pathname === "/api/search") {
     return searchConfigured(configPath, url.searchParams.get("knowledge_base") ?? undefined, url.searchParams.get("query") ?? "", Number(url.searchParams.get("top_k") ?? 5), url.searchParams.get("session") ?? undefined, true);
   }
-  if (method === "POST" && parts[0] === "api" && parts[1] === "knowledge-bases" && parts[2] && parts[3] === "import-local") {
-    const body = await jsonBody<{ path: string; validate?: boolean }>(request);
-    return runtime.importLocalFile(configPath, parts[2], body.path, Boolean(body.validate));
-  }
   if (method === "POST" && parts[0] === "api" && parts[1] === "knowledge-bases" && parts[2] && parts[3] === "skill") {
     const body = await jsonBody<{ target: "codex" | "claude" | "custom"; destination_path?: string; workflow?: "search" | "author" }>(request);
     return runtime.createSkill(configPath, parts[2], body.target, body.destination_path, body.workflow ?? "search");

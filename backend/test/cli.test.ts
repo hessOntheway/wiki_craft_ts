@@ -33,7 +33,7 @@ function parseJson<T>(result: CliResult): T {
   return JSON.parse(result.stdout) as T;
 }
 
-test("CLI init, knowledge-base, import, search, reindex, and skill flow", async () => {
+test("CLI init, knowledge-base, search, reindex, and skill flow", async () => {
   const { root, configPath } = await fixture();
   const init = parseJson<{ created: string[] }>(await runCli(configPath, ["init"], root));
   assert.ok(init.created.some((file) => file.endsWith("wiki_craft.toml")));
@@ -45,14 +45,9 @@ test("CLI init, knowledge-base, import, search, reindex, and skill flow", async 
   assert.equal(list.active_id, kb.id);
   assert.equal(list.knowledge_bases.length, 1);
 
-  const source = path.join(root, "source.md");
-  await fs.writeFile(source, "# CLI Source\n\nSearch parity and direct local import.");
-  const imported = parseJson<{ changed: boolean; summary_path: string; warnings: string[] }>(await runCli(configPath, ["import-local", "--knowledge-base", kb.id, "--file", source, "--validate"]));
-  assert.equal(imported.changed, true);
-  assert.match(imported.summary_path, /^evidence\/source_summaries\//);
-  assert.ok(imported.warnings.some((warning) => warning.includes("missing Summary")));
+  await fs.writeFile(path.join(kb.root, "knowledge", "source.md"), "# CLI Source\n\nSearch parity and direct knowledge indexing.");
 
-  const search = parseJson<{ retrieval_mode: string; index_status: { graph_edges: number }; results: Array<{ title: string; score_breakdown?: { graph?: number } }> }>(await runCli(configPath, ["search", "--knowledge-base", kb.id, "--query", "direct local import", "--session", "cli-session", "--json"]));
+  const search = parseJson<{ retrieval_mode: string; index_status: { graph_edges: number }; results: Array<{ title: string; score_breakdown?: { graph?: number } }> }>(await runCli(configPath, ["search", "--knowledge-base", kb.id, "--query", "direct knowledge indexing", "--session", "cli-session", "--json"]));
   assert.equal(search.retrieval_mode, "bm25");
   assert.ok(search.results.length > 0);
   assert.equal(search.index_status.graph_edges, 0);
@@ -65,7 +60,7 @@ test("CLI init, knowledge-base, import, search, reindex, and skill flow", async 
   assert.equal(sessionLog.latest_log_at_unix_ms, queryLogEntry.ts_unix_ms);
   assert.equal(sessionLog.session_id, "cli-session");
   assert.equal(sessionLog.session_missing, false);
-  assert.equal(queryLogEntry.query, "direct local import");
+  assert.equal(queryLogEntry.query, "direct knowledge indexing");
 
   const graphText = await runCli(configPath, ["search", "--knowledge-base", kb.id, "--query", "imported"]);
   assert.equal(graphText.code, 0, graphText.stderr);
@@ -73,6 +68,8 @@ test("CLI init, knowledge-base, import, search, reindex, and skill flow", async 
 
   const reindex = parseJson<{ indexed_chunks: number }>(await runCli(configPath, ["reindex", "--knowledge-base", kb.id, "--lexical-only"]));
   assert.equal(reindex.indexed_chunks, 2);
+  const events = (await fs.readFile(path.join(kb.root, "runtime", "search", "events.jsonl"), "utf8")).trim().split(/\n/u).map((line) => JSON.parse(line));
+  assert.ok(events.every((event) => event.import_mode === "full" && event.action === "add"));
 
   const skillDir = path.join(root, "skills");
   const skill = parseJson<{ skill_path: string; workflow: string }>(await runCli(configPath, ["skill", "create", "--knowledge-base", kb.id, "--target", "custom", "--destination-path", skillDir]));
@@ -90,6 +87,9 @@ test("CLI init, knowledge-base, import, search, reindex, and skill flow", async 
   assert.match(authorBody, /Mandatory Modeling Guide/);
   assert.match(authorBody, /docs\/code-model\/modeling-guide\.md/);
   assert.match(authorBody, /If that guide is unavailable, do not use this skill/);
+  assert.match(authorBody, /reindex --knowledge-base/);
+  assert.match(authorBody, /knowledge\/l1-\*\.md/);
+  assert.doesNotMatch(authorBody, /knowledge\/topics/);
   assert.doesNotMatch(authorBody, /L2 Interface Page Format/);
   assert.doesNotMatch(authorBody, /Fallback/);
 

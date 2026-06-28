@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { activateKnowledgeBase, configPathFromEnv, createKnowledgeBase, deleteKnowledgeBase, initializeProject, listKnowledgeBases } from "./config.ts";
-import * as runtime from "./runtime.ts";
+import { createSkill } from "./runtime.ts";
 import { reindexConfigured, renderTextResponse, searchConfigured } from "./search.ts";
 
 interface CliOptions {
@@ -30,9 +30,6 @@ async function main(): Promise<void> {
     const kb = takeOption(args, "--knowledge-base");
     return printJson(await reindexConfigured(config, kb, takeFlag(args, "--lexical-only")));
   }
-  if (command === "import-local") {
-    return printJson(await runtime.importLocalFile(config, requiredOption(args, "--knowledge-base"), requiredOption(args, "--file"), takeFlag(args, "--validate")));
-  }
   if (command === "skill") return skillCommand(config, args);
   if (command === "knowledge-base") return knowledgeBaseCommand(config, args);
   throw new Error(`unknown command: ${command}`);
@@ -56,7 +53,7 @@ async function skillCommand(config: string, args: string[]): Promise<void> {
   if (!["codex", "claude", "custom"].includes(target)) throw new Error("skill target must be codex, claude, or custom");
   const workflow = takeOption(args, "--workflow") ?? "search";
   if (!["search", "author"].includes(workflow)) throw new Error("skill workflow must be search or author");
-  return printJson(await runtime.createSkill(config, kb, target, takeOption(args, "--destination-path"), workflow as "search" | "author"));
+  return printJson(await createSkill(config, kb, target, takeOption(args, "--destination-path"), workflow as "search" | "author"));
 }
 
 async function knowledgeBaseCommand(config: string, args: string[]): Promise<void> {
@@ -112,7 +109,7 @@ function printJson(value: unknown): void {
 }
 
 function usage(): void {
-  console.log("wiki_craft <init|service|search|reindex|import-local|skill|knowledge-base> [options]");
+  console.log("wiki_craft <init|service|search|reindex|skill|knowledge-base> [options]");
 }
 
 main().catch((error) => {

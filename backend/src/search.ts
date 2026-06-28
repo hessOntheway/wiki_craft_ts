@@ -2,10 +2,10 @@ import { promises as fs } from "node:fs";
 import * as fssync from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { AppConfig, RetrievalMode } from "./types.ts";
+import type { AppConfig, RetrievalMode, WorkspacePaths } from "./types.ts";
 import { loadConfigForKnowledgeBase, listKnowledgeBases, workspacePaths } from "./config.ts";
 import { extractWikilinks, parseVaultFrontmatter } from "./runtime.ts";
-import { ensureDir, listFiles, normalizeWhitespace, nowMs, pathExists, readJson, relPosix, sha256Hex, truncateChars, writeJson } from "./util.ts";
+import { appendJsonl, ensureDir, listFiles, normalizeWhitespace, nowMs, pathExists, readJson, relPosix, sha256Hex, truncateChars, writeJson } from "./util.ts";
 
 interface ChunkGraphEdge {
   subject: string;
@@ -17,7 +17,7 @@ interface SearchChunk {
   id: string;
   displayPath: string;
   relativePath: string;
-  kind: "index" | "topic" | "source_summary";
+  kind: "index" | "topic";
   title?: string | null;
   heading?: string | null;
   body: string;
@@ -67,6 +67,41 @@ interface GraphHit {
   relations: SupportingRelation[];
 }
 
+type SearchIndexAction = "add" | "update" | "delete";
+type SearchImportMode = "full" | "incremental";
+
+interface SearchIndexEvent {
+  schema_version: 1;
+  event_id: string;
+  run_id: string;
+  import_mode: SearchImportMode;
+  ts_unix_ms: number;
+  action: SearchIndexAction;
+  chunk_id: string;
+  page_path: string;
+  heading?: string | null;
+  old_content_hash?: string | null;
+  new_content_hash?: string | null;
+  unit_hash?: string | null;
+  source_refs: string[];
+  index_ops: {
+    keyword: SearchIndexAction[];
+    vector: SearchIndexAction[];
+    graph: SearchIndexAction[];
+  };
+}
+
+interface SearchIndexErrorEvent {
+  schema_version: 1;
+  run_id: string;
+  event_id?: string;
+  ts_unix_ms: number;
+  stage: "keyword" | "vector" | "graph" | "event_log" | "cache";
+  chunk_id?: string;
+  action?: SearchIndexAction;
+  error: string;
+}
+
 interface GraphQueryPlan {
   predicate: "uses_l3_method";
   knownSide: "subject" | "object";
@@ -88,7 +123,7 @@ export interface SearchResponse {
   };
   results: Array<{
     path: string;
-    kind: "index" | "topic" | "source_summary";
+    kind: "index" | "topic";
     title?: string | null;
     heading?: string | null;
     score: number;
@@ -134,7 +169,7 @@ interface SearchQueryLogIndexStatus {
 interface SearchQueryLogResult {
   rank: number;
   path: string;
-  kind: "index" | "topic" | "source_summary";
+  kind: "index" | "topic";
   title?: string;
   heading?: string;
   score: number;
@@ -177,8 +212,8 @@ export async function searchConfigured(configPath: string, knowledgeBaseId: stri
 
   const config = await loadConfigForKnowledgeBase(configPath, kbId);
   const paths = workspacePaths(config);
-  const chunks = await collectChunks(paths.knowledgeCurrent, paths.sourceSummariesCurrent);
-  const cache = await refreshIndex(paths.searchIndexPath, paths.searchCachePath, chunks, config.search, false, false);
+  const chunks = await collectChunks(paths.knowledgeCurrent);
+  const cache = await refreshIndex(paths, chunks, config.search, false, false);
   const retrievalLimit = Math.max(20, Math.min(100, Math.round(topK || 5) * 4));
   const lexical = sqliteBm25(paths.searchIndexPath, trimmed, retrievalLimit)
     .then((hits) => hits.length > 0 ? hits : bm25(chunks, trimmed))
@@ -322,8 +357,8 @@ export async function reindexConfigured(configPath: string, knowledgeBaseId?: st
   const config = await loadConfigForKnowledgeBase(configPath, knowledgeBaseId);
   if (!config.knowledge_base) throw new Error("no active knowledge base; create one in the GUI or run `knowledge-base create`");
   const paths = workspacePaths(config);
-  const chunks = await collectChunks(paths.knowledgeCurrent, paths.sourceSummariesCurrent);
-  const cache = await refreshIndex(paths.searchIndexPath, paths.searchCachePath, chunks, config.search, lexicalOnly, true);
+  const chunks = await collectChunks(paths.knowledgeCurrent);
+  const cache = await refreshIndex(paths, chunks, config.search, lexicalOnly, true);
   return {
     indexed_chunks: chunks.length,
     embedded_chunks: cache.chunks.filter((chunk) => chunk.embedding).length,
@@ -366,29 +401,23 @@ export class HttpError extends Error {
   }
 }
 
-async function collectChunks(knowledgeRoot: string, summariesRoot: string): Promise<SearchChunk[]> {
+async function collectChunks(knowledgeRoot: string): Promise<SearchChunk[]> {
   const docs: SearchChunk[] = [];
-  const index = path.join(knowledgeRoot, "index.md");
-  if (await pathExists(index)) docs.push(...await readDocument(index, knowledgeRoot, "index"));
-  const topics = path.join(knowledgeRoot, "topics");
-  for (const file of await listFiles(topics, (candidate) => candidate.endsWith(".md"))) {
-    docs.push(...await readDocument(file, knowledgeRoot, "topic"));
-  }
-  for (const file of await listFiles(summariesRoot, (candidate) => candidate.endsWith(".md"))) {
-    docs.push(...await readDocument(file, knowledgeRoot, "source_summary", summariesRoot));
+  for (const file of await listFiles(knowledgeRoot, (candidate) => candidate.endsWith(".md"))) {
+    const relative = relPosix(knowledgeRoot, file);
+    docs.push(...await readDocument(file, knowledgeRoot, relative === "index.md" ? "index" : "topic"));
   }
   return docs.sort((left, right) => left.displayPath.localeCompare(right.displayPath));
 }
 
-async function readDocument(file: string, knowledgeRoot: string, kind: SearchChunk["kind"], alternateRoot?: string): Promise<SearchChunk[]> {
+async function readDocument(file: string, knowledgeRoot: string, kind: SearchChunk["kind"]): Promise<SearchChunk[]> {
   const raw = await fs.readFile(file, "utf8");
   const parsed = parseVaultFrontmatter(raw);
-  const root = alternateRoot ?? knowledgeRoot;
-  const relativePath = relPosix(root, file);
-  if (!alternateRoot && codeModelFileExcludedFromSearch(relativePath)) return [];
-  const displayPath = alternateRoot ? `evidence/source_summaries/${relativePath}` : relativePath;
+  const relativePath = relPosix(knowledgeRoot, file);
+  if (codeModelFileExcludedFromSearch(relativePath)) return [];
+  const displayPath = relativePath;
   const title = parsed.title ?? h1Title(parsed.body);
-  const sections = !alternateRoot && relativePath.startsWith("topics/code-model/")
+  const sections = codeModelLayerFile(relativePath)
     ? codeModelSections(relativePath, parsed.body)
     : splitSections(parsed.body);
   return sections.map((section, index) => ({
@@ -442,7 +471,12 @@ function codeModelSections(relativePath: string, body: string): Array<{ heading?
 }
 
 function codeModelFileExcludedFromSearch(relativePath: string): boolean {
-  return relativePath === "topics/code-model/modeling-guide.md" || relativePath === "topics/code-model/index.md";
+  return path.posix.basename(relativePath) === "modeling-guide.md";
+}
+
+function codeModelLayerFile(relativePath: string): boolean {
+  const basename = path.posix.basename(relativePath);
+  return basename.startsWith("l1-") || basename.startsWith("l2-") || basename.startsWith("l3-");
 }
 
 function h1Title(body: string): string | undefined {
@@ -599,33 +633,44 @@ function bm25(chunks: SearchChunk[], query: string): Array<{ id: string; score: 
 }
 
 async function refreshIndex(
-  sqlitePath: string,
-  cachePath: string,
+  paths: WorkspacePaths,
   chunks: SearchChunk[],
   settings: AppConfig["search"],
   lexicalOnly: boolean,
   force: boolean,
 ): Promise<SearchIndexCache> {
   const fingerprint = sha256Hex(JSON.stringify(chunks.map((chunk) => [chunk.id, sha256Hex(chunk.body)])));
-  syncSqliteIndex(sqlitePath, chunks, fingerprint, force);
   const enabled = embeddingsEnabled(settings);
   const signature = enabled ? embeddingSignature(settings) : null;
-  if (lexicalOnly || !enabled) clearSqliteEmbeddings(sqlitePath);
+  const events = syncSqliteIndex(paths.searchIndexPath, chunks, fingerprint, force, paths.searchEventsPath, paths.searchErrorsPath, lexicalOnly || !enabled);
+  if (lexicalOnly || !enabled) clearSqliteEmbeddings(paths.searchIndexPath);
   let warning: string | null = null;
   if (enabled && !lexicalOnly) {
-    for (const chunk of chunks) {
-      const state = sqliteEmbeddingState(sqlitePath, chunk.id);
+    const changedIds = new Set(events.filter((event) => event.action === "add" || event.action === "update").map((event) => event.chunk_id));
+    for (const chunk of chunks.filter((item) => changedIds.has(item.id))) {
+      const state = sqliteEmbeddingState(paths.searchIndexPath, chunk.id);
       if (state.embedding && state.embedding_signature === signature) continue;
       try {
-        persistSqliteEmbedding(sqlitePath, chunk.id, await embed(embeddableText(chunk), settings), signature!);
+        persistSqliteEmbedding(paths.searchIndexPath, chunk.id, await embed(embeddableText(chunk), settings), signature!);
       } catch (error) {
         warning = `embedding unavailable; using BM25 fallback: ${error instanceof Error ? error.message : String(error)}`;
-        persistSqliteEmbeddingError(sqlitePath, chunk.id, warning, signature);
+        persistSqliteEmbeddingError(paths.searchIndexPath, chunk.id, warning, signature);
+        const event = events.find((item) => item.chunk_id === chunk.id);
+        await appendSearchIndexError(paths.searchErrorsPath, {
+          schema_version: 1,
+          run_id: event?.run_id ?? `search-index-${nowMs()}`,
+          event_id: event?.event_id,
+          ts_unix_ms: nowMs(),
+          stage: "vector",
+          chunk_id: chunk.id,
+          action: event?.action,
+          error: warning,
+        });
         break;
       }
     }
   }
-  const rows = sqliteIndexRows(sqlitePath, settings.embedding_dimensions, signature);
+  const rows = sqliteIndexRows(paths.searchIndexPath, settings.embedding_dimensions, signature);
   const cache: SearchIndexCache = {
     schema_version: 1,
     fingerprint,
@@ -633,55 +678,199 @@ async function refreshIndex(
     embedding_signature: signature,
     embedding_warning: warning ?? rows.find((row) => row.embedding_error)?.embedding_error ?? null,
     stale_vectors: rows.filter((row) => row.embedding_signature && row.embedding_signature !== signature).length,
-    graph_edges: sqliteGraphEdgeCount(sqlitePath),
+    graph_edges: sqliteGraphEdgeCount(paths.searchIndexPath),
   };
-  await ensureDir(path.dirname(cachePath));
-  await writeJson(cachePath, cache);
+  await ensureDir(path.dirname(paths.searchCachePath));
+  await writeJson(paths.searchCachePath, cache);
   return cache;
 }
 
-function syncSqliteIndex(sqlitePath: string, chunks: SearchChunk[], fingerprint: string, force: boolean): void {
+async function appendSearchIndexError(file: string, event: SearchIndexErrorEvent): Promise<void> {
+  try {
+    await appendJsonl(file, event);
+  } catch {
+    // Search should remain available even when error logging fails.
+  }
+}
+
+function appendJsonlSync(file: string, value: unknown): void {
+  ensureDirSync(path.dirname(file));
+  fssync.appendFileSync(file, `${JSON.stringify(value)}\n`);
+}
+
+function syncSqliteIndex(sqlitePath: string, chunks: SearchChunk[], fingerprint: string, force: boolean, eventsPath: string, errorsPath: string, skipVector: boolean): SearchIndexEvent[] {
   ensureDirSync(path.dirname(sqlitePath));
   const db = new DatabaseSync(sqlitePath);
+  const runId = `reindex-${nowMs()}`;
   try {
     ensureSearchSchema(db);
     const current = db.prepare("SELECT value FROM search_meta WHERE key = 'vault_fingerprint'").get() as { value?: string } | undefined;
-    if (!force && current?.value === fingerprint) return;
-    db.exec("CREATE TEMP TABLE IF NOT EXISTS active_search_chunks (chunk_id TEXT PRIMARY KEY); DELETE FROM active_search_chunks;");
-    const active = db.prepare("INSERT INTO active_search_chunks (chunk_id) VALUES (?)");
-    const upsert = db.prepare(`INSERT INTO search_chunks (
-      chunk_id, content_hash, title, aliases, tags, wikilinks, heading, body, embeddable_text,
-      embedding, embedding_signature, embedding_error
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
-    ON CONFLICT(chunk_id) DO UPDATE SET
-      content_hash = excluded.content_hash,
-      title = excluded.title,
-      aliases = excluded.aliases,
-      tags = excluded.tags,
-      wikilinks = excluded.wikilinks,
-      heading = excluded.heading,
-      body = excluded.body,
-      embeddable_text = excluded.embeddable_text,
-      embedding = CASE WHEN search_chunks.content_hash = excluded.content_hash THEN search_chunks.embedding ELSE NULL END,
-      embedding_signature = CASE WHEN search_chunks.content_hash = excluded.content_hash THEN search_chunks.embedding_signature ELSE NULL END,
-      embedding_error = CASE WHEN search_chunks.content_hash = excluded.content_hash THEN search_chunks.embedding_error ELSE NULL END`);
-    for (const chunk of chunks) {
-      const title = chunk.title ?? "";
-      const aliases = chunk.aliases.join(" ");
-      const tags = chunk.tags.join(" ");
-      const wikilinks = chunk.wikilinks.join(" ");
-      const heading = chunk.heading ?? "";
-      const embeddable = embeddableText(chunk);
-      active.run(chunk.id);
-      upsert.run(chunk.id, sha256Hex(chunk.body), title, aliases, tags, wikilinks, heading, chunk.body, embeddable);
+    if (!force && current?.value === fingerprint) return [];
+    const oldRows = loadIndexedChunkState(db);
+    const events = diffSearchIndexEvents(runId, oldRows, chunks, skipVector);
+    if (events.length === 0) {
+      db.prepare("INSERT OR REPLACE INTO search_meta (key, value) VALUES ('schema_version', '1')").run();
+      db.prepare("INSERT OR REPLACE INTO search_meta (key, value) VALUES ('vault_fingerprint', ?)").run(fingerprint);
+      return [];
     }
-    db.exec("DELETE FROM search_chunks WHERE chunk_id NOT IN (SELECT chunk_id FROM active_search_chunks);");
-    rebuildGraphIndex(db, chunks);
-    rebuildFtsIndex(db);
-    db.prepare("INSERT OR REPLACE INTO search_meta (key, value) VALUES ('schema_version', '1')").run();
-    db.prepare("INSERT OR REPLACE INTO search_meta (key, value) VALUES ('vault_fingerprint', ?)").run(fingerprint);
+    try {
+      for (const event of events) appendJsonlSync(eventsPath, event);
+    } catch (error) {
+      appendJsonlSync(errorsPath, {
+        schema_version: 1,
+        run_id: runId,
+        ts_unix_ms: nowMs(),
+        stage: "event_log",
+        error: error instanceof Error ? error.message : String(error),
+      } satisfies SearchIndexErrorEvent);
+      throw error;
+    }
+    try {
+      db.exec("BEGIN");
+      const byId = new Map(chunks.map((chunk) => [chunk.id, chunk]));
+      for (const event of events) applyChunkIndexEvent(db, event, byId.get(event.chunk_id));
+      rebuildFtsIndex(db);
+      db.prepare("INSERT OR REPLACE INTO search_meta (key, value) VALUES ('schema_version', '1')").run();
+      db.prepare("INSERT OR REPLACE INTO search_meta (key, value) VALUES ('vault_fingerprint', ?)").run(fingerprint);
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Best effort rollback only.
+      }
+      appendJsonlSync(errorsPath, {
+        schema_version: 1,
+        run_id: runId,
+        ts_unix_ms: nowMs(),
+        stage: "keyword",
+        error: error instanceof Error ? error.message : String(error),
+      } satisfies SearchIndexErrorEvent);
+      throw error;
+    }
+    return events;
   } finally {
     db.close();
+  }
+}
+
+function loadIndexedChunkState(db: DatabaseSync): Map<string, { content_hash: string; path: string; heading?: string | null }> {
+  const rows = db.prepare("SELECT chunk_id, content_hash, heading FROM search_chunks ORDER BY chunk_id").all() as Array<{ chunk_id: string; content_hash: string; heading?: string | null }>;
+  return new Map(rows.map((row) => [row.chunk_id, { content_hash: row.content_hash, path: row.chunk_id.split("#")[0] ?? row.chunk_id, heading: row.heading ?? null }]));
+}
+
+function diffSearchIndexEvents(runId: string, oldRows: Map<string, { content_hash: string; path: string; heading?: string | null }>, chunks: SearchChunk[], skipVector: boolean): SearchIndexEvent[] {
+  const mode: SearchImportMode = oldRows.size === 0 ? "full" : "incremental";
+  const now = nowMs();
+  const events: SearchIndexEvent[] = [];
+  const byId = new Map(chunks.map((chunk) => [chunk.id, chunk]));
+  for (const chunk of chunks) {
+    const old = oldRows.get(chunk.id);
+    const nextHash = sha256Hex(chunk.body);
+    if (!old) {
+      events.push(searchIndexEvent({ runId, mode, ts: now, action: "add", chunk, oldHash: null, newHash: nextHash, skipVector }));
+    } else if (old.content_hash !== nextHash) {
+      events.push(searchIndexEvent({ runId, mode, ts: now, action: "update", chunk, oldHash: old.content_hash, newHash: nextHash, skipVector }));
+    }
+  }
+  for (const [id, old] of oldRows) {
+    if (byId.has(id)) continue;
+    events.push(searchIndexEvent({ runId, mode, ts: now, action: "delete", oldChunk: { id, path: old.path, heading: old.heading }, oldHash: old.content_hash, newHash: null, skipVector }));
+  }
+  return events.sort((left, right) => left.chunk_id.localeCompare(right.chunk_id) || left.action.localeCompare(right.action));
+}
+
+function searchIndexEvent(input: {
+  runId: string;
+  mode: SearchImportMode;
+  ts: number;
+  action: SearchIndexAction;
+  chunk?: SearchChunk;
+  oldChunk?: { id: string; path: string; heading?: string | null };
+  oldHash: string | null;
+  newHash: string | null;
+  skipVector: boolean;
+}): SearchIndexEvent {
+  const chunkId = input.chunk?.id ?? input.oldChunk!.id;
+  const pagePath = input.chunk?.displayPath ?? input.oldChunk!.path;
+  const heading = input.chunk?.heading ?? input.oldChunk?.heading ?? null;
+  const keyword = input.action === "update" ? ["delete", "add"] as SearchIndexAction[] : [input.action];
+  const vector = input.skipVector ? [] : keyword;
+  const graph = keyword;
+  return {
+    schema_version: 1,
+    event_id: sha256Hex(`${input.runId}\0${input.action}\0${chunkId}\0${input.oldHash ?? ""}\0${input.newHash ?? ""}`),
+    run_id: input.runId,
+    import_mode: input.mode,
+    ts_unix_ms: input.ts,
+    action: input.action,
+    chunk_id: chunkId,
+    page_path: pagePath,
+    heading,
+    old_content_hash: input.oldHash,
+    new_content_hash: input.newHash,
+    unit_hash: input.chunk?.version_hashes[0] ?? null,
+    source_refs: input.chunk ? [...input.chunk.source_urls, ...input.chunk.source_ids] : [],
+    index_ops: { keyword, vector, graph },
+  };
+}
+
+function applyChunkIndexEvent(db: DatabaseSync, event: SearchIndexEvent, chunk?: SearchChunk): void {
+  if (event.action === "delete") {
+    deleteChunkIndexes(db, event.chunk_id);
+    return;
+  }
+  if (!chunk) throw new Error(`missing chunk for ${event.action} event: ${event.chunk_id}`);
+  if (event.action === "update") deleteChunkIndexes(db, event.chunk_id);
+  addChunkIndexes(db, chunk);
+}
+
+function deleteChunkIndexes(db: DatabaseSync, chunkId: string): void {
+  db.prepare("DELETE FROM search_graph_edges WHERE chunk_id = ?").run(chunkId);
+  db.prepare("DELETE FROM search_chunks WHERE chunk_id = ?").run(chunkId);
+}
+
+function addChunkIndexes(db: DatabaseSync, chunk: SearchChunk): void {
+  const contentHash = sha256Hex(chunk.body);
+  db.prepare(`INSERT INTO search_chunks (
+    chunk_id, content_hash, title, aliases, tags, wikilinks, heading, body, embeddable_text,
+    embedding, embedding_signature, embedding_error
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`).run(
+    chunk.id,
+    contentHash,
+    chunk.title ?? "",
+    chunk.aliases.join(" "),
+    chunk.tags.join(" "),
+    chunk.wikilinks.join(" "),
+    chunk.heading ?? "",
+    chunk.body,
+    embeddableText(chunk),
+  );
+  insertGraphEdgesForChunk(db, chunk, contentHash);
+}
+
+function insertGraphEdgesForChunk(db: DatabaseSync, chunk: SearchChunk, contentHash: string): void {
+  const insert = db.prepare(`INSERT OR REPLACE INTO search_graph_edges (
+    edge_id, chunk_id, document_id, subject, predicate, object,
+    subject_norm, predicate_norm, object_norm,
+    evidence_count, content_hash, attrs_json, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  for (const edge of graphEdgesForChunk(chunk, contentHash)) {
+    insert.run(
+      graphEdgeId(edge),
+      edge.chunk_id,
+      edge.document_id,
+      edge.subject,
+      edge.predicate,
+      edge.object,
+      normalizeGraphText(edge.subject),
+      normalizeGraphText(edge.predicate),
+      normalizeGraphText(edge.object),
+      edge.evidence_count,
+      edge.content_hash,
+      edge.attrs_json,
+      edge.updated_at,
+    );
   }
 }
 
@@ -943,7 +1132,11 @@ INSERT INTO search_chunks_fts(rowid, title, aliases, tags, wikilinks, heading, b
   SELECT rowid, title, aliases, tags, wikilinks, heading, body FROM search_chunks;`);
     db.prepare("INSERT OR REPLACE INTO search_meta (key, value) VALUES ('fts5_available', 'true')").run();
   } catch (error) {
-    db.exec("DROP TABLE IF EXISTS search_chunks_fts;");
+    try {
+      db.exec("DROP TABLE IF EXISTS search_chunks_fts;");
+    } catch {
+      // FTS5 may be unavailable even for DROP; BM25 fallback can use in-memory scoring.
+    }
     db.prepare("INSERT OR REPLACE INTO search_meta (key, value) VALUES ('fts5_available', 'false')").run();
     db.prepare("INSERT OR REPLACE INTO search_meta (key, value) VALUES ('fts5_error', ?)").run(error instanceof Error ? error.message : String(error));
   }

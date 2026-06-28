@@ -2,17 +2,17 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-Wiki Craft TS is a TypeScript/Tauri desktop and CLI project for searching approved, Markdown-first business knowledge. It is intentionally small: one local backend service, one GUI, one CLI, and one approved knowledge layout that coding agents can query before answering review or design questions.
+Wiki Craft TS is a TypeScript/Tauri desktop and CLI project for searching Markdown-first business knowledge. It is intentionally small: one local backend service, one GUI, one CLI, and one knowledge layout that coding agents can query before answering review or design questions.
 
 ## What It Does
 
 - Keeps multiple named knowledge bases under `.wiki_craft/knowledge_bases/`.
-- Searches approved Markdown with SQLite FTS5 BM25, graph metadata, and optional embeddings.
-- Imports local files directly into approved evidence.
+- Searches knowledge Markdown with SQLite FTS5 BM25, graph metadata, and optional embeddings.
+- Generates authoring skills that write knowledge files directly under a selected knowledge base.
 - Generates Codex/Claude/custom skills that call the Wiki Craft CLI search command.
 - Runs as a single desktop app with search as the primary screen and lightweight management in the sidebar.
 
-Wiki Craft does not generate knowledge with an LLM, stage candidates, review diffs, or run code-analysis agents. Local import is treated as a user-approved evidence action.
+Wiki Craft does not stage candidates or run a separate approval flow. Knowledge files under a selected knowledge base are the source of truth.
 
 ## Project Map
 
@@ -21,8 +21,8 @@ backend/src/
   cli.ts        npm CLI command entrypoint
   server.ts     single local HTTP API
   config.ts     wiki_craft.toml, registry, knowledge-base config, paths
-  runtime.ts    local import, skill export, Markdown frontmatter helpers
-  search.ts     approved-vault search, SQLite FTS5, optional embeddings
+  runtime.ts    skill export and Markdown frontmatter helpers
+  search.ts     knowledge-vault search, SQLite FTS5, optional embeddings
   types.ts      shared public contracts
   util.ts       filesystem, hashing, path, TOML, and Markdown helpers
 
@@ -45,15 +45,6 @@ npm run wiki-craft -- knowledge-base create \
   --focus "Business context for AI code review"
 ```
 
-Import a local approved evidence file:
-
-```bash
-npm run wiki-craft -- import-local \
-  --knowledge-base <knowledge_base_id> \
-  --file /path/to/business-context.md \
-  --validate
-```
-
 Search it:
 
 ```bash
@@ -73,7 +64,7 @@ npm run wiki-craft -- skill create \
   --workflow search
 ```
 
-Generate a code-analysis authoring skill for external AI tools that should produce Wiki Craft topic Markdown:
+Generate a code-analysis authoring skill for external AI tools that should write Wiki Craft topic Markdown and reindex the knowledge base:
 
 ```bash
 npm run wiki-craft -- skill create \
@@ -129,30 +120,28 @@ The legacy `embedding_enabled = true` setting still enables the Ollama provider 
 npm run wiki-craft -- reindex --knowledge-base <knowledge_base_id>
 ```
 
-Existing approved Markdown is the source of truth. Reindexing scans all current chunks and stores missing or stale embedding blobs in `runtime/search/index.sqlite`.
+Existing knowledge Markdown is the source of truth. Reindexing scans all current chunks, writes chunk-level add/update/delete events, and stores missing or stale embedding blobs in `runtime/search/index.sqlite`.
 
 ## Disk Model
 
-Approved Markdown is the source of truth:
+Knowledge Markdown is the source of truth:
 
 ```text
 .wiki_craft/
   knowledge_bases/
     registry.json
     {id}/
-      knowledge_base.toml
       knowledge/
-        approved/
-          index.md
-          topics/*.md
-          evidence/source_summaries/*.md
-          evidence/sources/manifest.json
+        index.md
+        *.md
       runtime/
         search/index.sqlite
         search/index.json
+        search/events.jsonl
+        search/errors.jsonl
 ```
 
-Search reads only `knowledge/approved`. The search index is derived and can be rebuilt:
+Search reads only `knowledge`. The search index is derived and can be rebuilt:
 
 ```bash
 npm run wiki-craft -- reindex --knowledge-base <knowledge_base_id> --lexical-only

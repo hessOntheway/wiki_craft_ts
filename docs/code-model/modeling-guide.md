@@ -116,7 +116,7 @@ Index rules:
 - Keep the page short and project-level.
 - Do not include L1/L2/L3 relation fields.
 - Do not add `Drill down to L2`, `Calls L3`, `Relations`, or `Graph Triples`.
-- The search index must exclude `topics/code-model/index.md`; generated skills should read it directly before searching when project orientation is needed.
+- The search index must exclude `index.md`; generated skills should read it directly before searching when project orientation is needed.
 
 ## L3: Module And Object API Layer
 
@@ -297,7 +297,7 @@ When modeled source code changes:
 5. If a route, command, gRPC method, Kafka consumer, or other interface changed, update L2 pages.
 6. If a capability boundary changed, update L1.
 7. Keep summaries human-readable and compact.
-8. Verify the generated `code-model/` directory contains only current `index.md` and L1/L2/L3 pages.
+8. Verify the generated knowledge directory contains current `index.md` and L1/L2/L3 pages directly.
 
 When adding a new module:
 
@@ -322,4 +322,4 @@ Before finishing a model update:
 - L2 pages keep each interface's business goal, entry parameters, and `Calls L3` together.
 - L1 pages drill down only to L2.
 - `index.md` exists for project orientation and is excluded from search indexing.
-- The generated `code-model/` directory contains no stale or duplicate model pages.
+- The generated knowledge directory contains no stale or duplicate model pages.

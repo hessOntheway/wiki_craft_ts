@@ -426,11 +426,6 @@ h2 {
   color: var(--blue);
 }
 
-.result-kind.source_summary {
-  background: var(--warning-soft);
-  color: var(--warning);
-}
-
 .result-meta {
   color: var(--muted);
   font-size: 12px;
