@@ -106,33 +106,39 @@ test("code-model reindex chunks strict layers and derives graph edges", async ()
   const kb = await createKnowledgeBase(configPath, { name: "Graphable", focus: "graph search" });
   const codeModel = path.join(kb.root, "knowledge", "approved", "topics", "code-model");
   await fs.mkdir(codeModel, { recursive: true });
-  await fs.writeFile(path.join(codeModel, "index.md"), `# Backend Project Index
+  await fs.writeFile(path.join(codeModel, "index.md"), `# Project Index
 
 ## Summary
 
 PROJECT_INDEX_ONLY This project index should be read directly for orientation and should not become a search chunk.
 `);
-  await fs.writeFile(path.join(codeModel, "l1-backend-repo.md"), `# Backend Repository Model
+  await fs.writeFile(path.join(codeModel, "l1-project-capabilities.md"), `# Project Capability Model
 
 ## Summary
 
-PROJECT_OVERVIEW_ONLY Backend summary.
+PROJECT_OVERVIEW_ONLY Project summary.
 
 ## Capabilities
 
 ### Approved Search
 
-- Business function: Search approved knowledge.
+- Business goal: Search approved knowledge.
+- Business context: Review agents need approved retrieval before answering.
+- Business domains: Search, indexing.
+- Expected outcome: Relevant approved chunks are returned.
 - Drill down to L2:
-  - [Backend HTTP Endpoints](l2-http-endpoints.md): \`GET /api/search\`
+  - [HTTP Endpoints](l2-http-endpoints.md): \`GET /api/search\`
 
 ### Skill Export
 
-- Business function: Generate skills.
+- Business goal: Generate skills.
+- Business context: Users need reusable AI-tool instructions.
+- Business domains: Skill export.
+- Expected outcome: A skill directory is written.
 - Drill down to L2:
-  - [Backend HTTP Endpoints](l2-http-endpoints.md): \`POST /api/knowledge-bases/:kb_id/skill\`
+  - [HTTP Endpoints](l2-http-endpoints.md): \`POST /api/knowledge-bases/:kb_id/skill\`
 `);
-  await fs.writeFile(path.join(codeModel, "l2-http-endpoints.md"), `# Backend HTTP Endpoints
+  await fs.writeFile(path.join(codeModel, "l2-http-endpoints.md"), `# HTTP Endpoints
 
 ## Summary
 
@@ -142,18 +148,28 @@ HTTP API summary.
 
 ### \`GET /api/search\`
 
-- Business function: Search approved knowledge.
+- Business goal: Search approved knowledge.
+- Business rules:
+  - Query text must not be empty.
+- Business constraints:
+  - Results come from approved knowledge.
+- Expected outcome: Ranked approved search results are returned.
 - Entry parameters:
-  - Query \`knowledge_base\`: Knowledge base ID.
-  - Query \`query\`: Search text.
+  - \`knowledge_base\` (\`query\`, required): Knowledge base ID.
+  - \`query\` (\`query\`, required): Search text.
 - Calls L3:
   - \`search.searchConfigured(configPath, knowledgeBaseId, query, topK, requireExplicitKnowledgeBase)\`
 
 ### \`POST /api/knowledge-bases/:kb_id/skill\`
 
-- Business function: Generate a skill.
+- Business goal: Generate a skill.
+- Business rules:
+  - Target knowledge base must exist.
+- Business constraints:
+  - Custom targets require a destination.
+- Expected outcome: A reusable skill is written.
 - Entry parameters:
-  - Path \`kb_id\`: Knowledge base ID.
+  - \`kb_id\` (\`path\`, required): Knowledge base ID.
 - Calls L3:
   - \`runtime.createSkill(configPath, kbId, target, destination, workflow)\`
 `);
@@ -167,17 +183,42 @@ Search module summary.
 
 ### \`searchConfigured(configPath, knowledgeBaseId, query, topK, requireExplicitKnowledgeBase?)\`
 
-- Purpose: Search approved knowledge.
+- Business responsibility: Search approved knowledge.
+- Business rules:
+  - Query text must not be empty.
+- Business constraints:
+  - Only approved knowledge is searched.
+- Expected outcome: Structured search results are returned.
 - Parameters:
   - \`query\`: Search text.
 - Returns: Search response.
 
 ### \`reindexConfigured(configPath, knowledgeBaseId?, lexicalOnly?)\`
 
-- Purpose: Rebuild indexes.
+- Business responsibility: Rebuild indexes.
+- Business rules:
+  - A knowledge base must be selected.
+- Business constraints:
+  - Reindexing reflects approved files.
+- Expected outcome: Index status is returned.
 - Parameters:
   - \`knowledgeBaseId\`: Knowledge base ID.
 - Returns: Index status.
+`);
+  await fs.writeFile(path.join(codeModel, "l3-legacy-module.md"), `# Legacy Module API
+
+## Summary
+
+This old-format page should not become a code-model chunk.
+
+## Exported API
+
+### \`legacySearch(query)\`
+
+- Purpose: Search approved knowledge.
+- Parameters:
+  - \`query\`: Search text.
+- Returns: Search response.
 `);
   await fs.writeFile(path.join(codeModel, "modeling-guide.md"), `# Modeling Guide
 
@@ -226,7 +267,7 @@ This format guide should not become a search chunk.
     assert.ok(codeChunks.some((chunk) => chunk.heading === "Approved Search"));
     assert.ok(codeChunks.some((chunk) => chunk.heading === "Endpoints > GET /api/search"));
     assert.ok(codeChunks.some((chunk) => chunk.heading === "Exported API > searchConfigured(configPath, knowledgeBaseId, query, topK, requireExplicitKnowledgeBase?)"));
-    const projectIndex = db.prepare("SELECT COUNT(*) AS count FROM search_chunks WHERE body LIKE '%PROJECT_OVERVIEW_ONLY%' OR body LIKE '%PROJECT_INDEX_ONLY%' OR chunk_id IN ('topics/code-model/modeling-guide.md#0', 'topics/code-model/index.md#0')").get() as { count: number };
+    const projectIndex = db.prepare("SELECT COUNT(*) AS count FROM search_chunks WHERE body LIKE '%PROJECT_OVERVIEW_ONLY%' OR body LIKE '%PROJECT_INDEX_ONLY%' OR body LIKE '%old-format page%' OR chunk_id IN ('topics/code-model/modeling-guide.md#0', 'topics/code-model/index.md#0')").get() as { count: number };
     assert.equal(projectIndex.count, 0);
     const l1 = db.prepare("SELECT COUNT(*) AS count FROM search_graph_edges WHERE predicate = 'drills_down_to_l2'").get() as { count: number };
     assert.equal(l1.count, 2);
@@ -273,7 +314,10 @@ Agent Memory stores approved knowledge and retrieves it for AI review.
 
 ### Retrieval
 
-- Business function: Retrieve knowledge.
+- Business goal: Retrieve knowledge.
+- Business context: Review agents need approved retrieval context.
+- Business domains: Retrieval.
+- Expected outcome: Search interfaces expose approved knowledge.
 - Drill down to L2:
   - [Search Interfaces](l2-search.md): \`search\`
 `);
@@ -286,6 +330,9 @@ Agent Memory stores approved knowledge and retrieves it for AI review.
   assert.match(skill, /npm run wiki-craft -- --config/);
   assert.match(skill, new RegExp(`--knowledge-base '${kb.id}'`));
   assert.doesNotMatch(skill, /Mandatory Modeling Guide/);
+  assert.match(skill, /All search queries must be written in English/);
+  assert.match(skill, /rewrite the search intent into a concise English query/);
+  assert.match(skill, /Replace `<query>` with a concise English natural-language query/);
   assert.match(skill, /Project Index/);
   assert.match(skill, /read the project index file directly first, then run search/);
   assert.match(skill, /topics\/code-model\/index\.md/);

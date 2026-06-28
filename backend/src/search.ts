@@ -263,7 +263,9 @@ async function readDocument(file: string, knowledgeRoot: string, kind: SearchChu
   if (!alternateRoot && codeModelFileExcludedFromSearch(relativePath)) return [];
   const displayPath = alternateRoot ? `evidence/source_summaries/${relativePath}` : relativePath;
   const title = parsed.title ?? h1Title(parsed.body);
-  const sections = codeModelSections(relativePath, parsed.body) ?? splitSections(parsed.body);
+  const sections = !alternateRoot && relativePath.startsWith("topics/code-model/")
+    ? codeModelSections(relativePath, parsed.body)
+    : splitSections(parsed.body);
   return sections.map((section, index) => ({
     id: `${displayPath}#${index}`,
     displayPath,
@@ -306,13 +308,12 @@ function splitSections(body: string): Array<{ heading?: string | null; text: str
   }));
 }
 
-function codeModelSections(relativePath: string, body: string): Array<{ heading?: string | null; text: string; lineOffset: number; graphEdges?: ChunkGraphEdge[] }> | null {
-  if (!relativePath.startsWith("topics/code-model/")) return null;
+function codeModelSections(relativePath: string, body: string): Array<{ heading?: string | null; text: string; lineOffset: number; graphEdges?: ChunkGraphEdge[] }> {
   const basename = path.posix.basename(relativePath);
   if (basename.startsWith("l1-")) return l1CodeModelSections(body);
   if (basename.startsWith("l2-")) return l2CodeModelSections(body);
   if (basename.startsWith("l3-")) return l3CodeModelSections(body);
-  return null;
+  return [];
 }
 
 function codeModelFileExcludedFromSearch(relativePath: string): boolean {
@@ -323,10 +324,15 @@ function h1Title(body: string): string | undefined {
   return body.split(/\r?\n/u).find((line) => /^#\s+\S/u.test(line))?.replace(/^#\s+/u, "").trim();
 }
 
-function l1CodeModelSections(body: string): Array<{ heading?: string | null; text: string; lineOffset: number; graphEdges?: ChunkGraphEdge[] }> | null {
+function l1CodeModelSections(body: string): Array<{ heading?: string | null; text: string; lineOffset: number; graphEdges?: ChunkGraphEdge[] }> {
   const capabilityBlocks = subsectionBlocks(body, "Capabilities", 3);
-  if (capabilityBlocks.length === 0) return null;
-  return capabilityBlocks.map((block) => ({
+  return capabilityBlocks.filter((block) => hasRequiredFields(block.text, [
+    "Business goal",
+    "Business context",
+    "Business domains",
+    "Expected outcome",
+    "Drill down to L2",
+  ])).map((block) => ({
     heading: block.heading,
     text: block.text,
     lineOffset: block.lineOffset,
@@ -334,11 +340,17 @@ function l1CodeModelSections(body: string): Array<{ heading?: string | null; tex
   }));
 }
 
-function l2CodeModelSections(body: string): Array<{ heading?: string | null; text: string; lineOffset: number; graphEdges?: ChunkGraphEdge[] }> | null {
+function l2CodeModelSections(body: string): Array<{ heading?: string | null; text: string; lineOffset: number; graphEdges?: ChunkGraphEdge[] }> {
   const familyHeadings = ["Endpoints", "Commands", "gRPC Methods", "Kafka Consumers"];
   const blocks = familyHeadings.flatMap((family) => subsectionBlocks(body, family, 3).map((block) => ({ ...block, family })));
-  if (blocks.length === 0) return null;
-  return blocks.sort((left, right) => left.lineOffset - right.lineOffset).map((block) => ({
+  return blocks.filter((block) => hasRequiredFields(block.text, [
+    "Business goal",
+    "Business rules",
+    "Business constraints",
+    "Expected outcome",
+    "Entry parameters",
+    "Calls L3",
+  ])).sort((left, right) => left.lineOffset - right.lineOffset).map((block) => ({
     heading: `${block.family} > ${block.heading}`,
     text: block.text,
     lineOffset: block.lineOffset,
@@ -346,15 +358,25 @@ function l2CodeModelSections(body: string): Array<{ heading?: string | null; tex
   }));
 }
 
-function l3CodeModelSections(body: string): Array<{ heading?: string | null; text: string; lineOffset: number; graphEdges?: ChunkGraphEdge[] }> | null {
+function l3CodeModelSections(body: string): Array<{ heading?: string | null; text: string; lineOffset: number; graphEdges?: ChunkGraphEdge[] }> {
   const blocks = subsectionBlocks(body, "Exported API", 3);
-  if (blocks.length === 0) return null;
-  return blocks.map((block) => ({
+  return blocks.filter((block) => hasRequiredFields(block.text, [
+    "Business responsibility",
+    "Business rules",
+    "Business constraints",
+    "Expected outcome",
+    "Parameters",
+    "Returns",
+  ])).map((block) => ({
     heading: `Exported API > ${block.heading}`,
     text: block.text,
     lineOffset: block.lineOffset,
     graphEdges: [],
   }));
+}
+
+function hasRequiredFields(text: string, fields: string[]): boolean {
+  return fields.every((field) => text.split(/\r?\n/u).some((line) => line.trim().startsWith(`- ${field}:`)));
 }
 
 function subsectionBlocks(body: string, parentHeading: string, childLevel: number): Array<{ heading: string; text: string; lineOffset: number }> {

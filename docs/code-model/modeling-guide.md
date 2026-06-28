@@ -6,10 +6,10 @@ This guide defines the required Markdown structure for the Wiki Craft code-model
 
 The model has two audiences:
 
-- Humans who need a readable map of backend behavior.
+- Humans who need a readable map of project behavior.
 - AI code-review agents that need fast business and API context before searching source code directly.
 
-Current scope: `backend/src/**` only. Frontend and Tauri shell code are outside this model unless a maintainer explicitly expands the scope.
+Current scope is the source tree selected by the maintainer for the code-model run. The model may cover server applications, web applications, desktop shells, libraries, CLIs, workers, or mixed codebases.
 
 ## Hard Format Rules
 
@@ -38,7 +38,7 @@ If any layer is missing, keep analyzing and add the missing pages before conside
 Recommended starter file set:
 
 - `index.md`
-- `l1-backend-capabilities.md`
+- `l1-project-capabilities.md`
 - `l2-entrypoints.md`
 - `l3-<module-name>-module.md`
 
@@ -46,11 +46,13 @@ Recommended starter file set:
 
 Do not treat one business slice as a complete project model. Before authoring, scan the project entrypoint surface and use it to decide the required L1/L2/L3 pages.
 
-For backend services, inspect these entrypoint families when present:
+Inspect these entrypoint families when present:
 
-- HTTP servers and route registration, such as `cmd/server`
-- Kafka/event consumers, such as `cmd/consumer` or `cmd/*consumer`
-- CLI or scheduled jobs, such as `cmd/*cli` or cron job registries
+- HTTP routes, RPC handlers, or API registration.
+- UI routes, screens, actions, event handlers, or desktop commands.
+- CLI commands and subcommands.
+- Background workers, queues, consumers, scheduled jobs, or automation registries.
+- Public library exports, plugin hooks, SDK APIs, or other stable externally-triggered entrypoints.
 - Other stable externally-triggered entrypoints
 
 Completion requires:
@@ -58,7 +60,7 @@ Completion requires:
 - The project index briefly explains what the project does and is not treated as searchable review knowledge.
 - L1 covers every major business capability exposed by the scanned entrypoints.
 - L2 covers every discovered entrypoint family, not just one endpoint group.
-- L3 covers the main service/module APIs called by those L2 entrypoints.
+- L3 covers the main module, object, or exported APIs called by those L2 entrypoints.
 
 If only part of the project is intentionally modeled, add a `Partial coverage:` note in the L1 Summary and name the included and excluded entrypoint families.
 
@@ -80,7 +82,7 @@ The model has one orientation page plus three indexed model layers:
 | Layer | Page family | Question it answers |
 | --- | --- | --- |
 | Index | project orientation page | What is this project, in plain language, before searching detailed model chunks? |
-| L1 | backend/repo capability pages | What does the backend do, and which L2 interfaces expose each capability? |
+| L1 | project/repository capability pages | What does the project do, and which L2 interfaces expose each capability? |
 | L2 | interface entrypoint pages | What external entrypoints exist, what business goal do they expose, and what L3 methods do they call? |
 | L3 | module/class/function pages | What public or exported code surfaces exist, and what are their responsibilities? |
 
@@ -88,7 +90,7 @@ Build and maintain the model from factual details into project orientation:
 
 1. Inspect L3 exported module APIs, public classes, and important callable surfaces.
 2. Group those surfaces into L2 interface entrypoints.
-3. Summarize the L2 behavior into L1 backend capabilities.
+3. Summarize the L2 behavior into L1 project capabilities.
 4. Write or refresh `index.md` as a short project orientation page.
 
 ## Index: Project Orientation Page
@@ -102,7 +104,7 @@ Required index format:
 
 ## Summary
 
-<one to three short paragraphs explaining what the project does, who uses it, and what backend scope the code model covers>
+<one to three short paragraphs explaining what the project does, who uses it, and what source scope the code model covers>
 ```
 
 Required index keywords:
@@ -217,7 +219,7 @@ Required L2 keywords:
 
 For graph retrieval, do not hand-author `Graph Triples`. The graph index is derived from each interface subsection title and its `Calls L3` list.
 
-## L1: Backend Capability Layer
+## L1: Project Capability Layer
 
 Build L1 last. L1 is a compact project-level abstraction and must route readers only to L2 pages. L1 must not directly point to L3 methods or source modules.
 
@@ -270,8 +272,8 @@ Use stable, readable filenames:
 Use stable, readable page titles:
 
 - `# <Project Name>`
-- `# Backend Repository Model`
-- `# Backend HTTP Endpoints`
+- `# Project Repository Model`
+- `# Project HTTP Endpoints`
 - `# Runtime Module API`
 
 ## Forbidden Sections
@@ -286,7 +288,7 @@ Do not include these sections in generated code-model pages:
 
 ## Maintenance Workflow
 
-When backend code changes:
+When modeled source code changes:
 
 1. Update affected L3 module pages first.
 2. If exported functions/classes changed, update the matching per-export subsections.
@@ -297,7 +299,7 @@ When backend code changes:
 7. Keep summaries human-readable and compact.
 8. Verify the generated `code-model/` directory contains only current `index.md` and L1/L2/L3 pages.
 
-When adding a new backend module:
+When adding a new module:
 
 1. Create a new L3 page only if the module has review-relevant exported behavior.
 2. Document exported APIs and core parameters together before writing higher-layer summaries.
