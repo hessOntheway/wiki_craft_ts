@@ -20,8 +20,9 @@ async function main(): Promise<void> {
     const kb = takeOption(args, "--knowledge-base");
     const query = requiredOption(args, "--query");
     const topK = Number(takeOption(args, "--top-k") ?? 5);
+    const session = takeOption(args, "--session");
     const json = takeFlag(args, "--json");
-    const response = await searchConfigured(config, kb, query, topK);
+    const response = await searchConfigured(config, kb, query, topK, session);
     console.log(json ? JSON.stringify(response, null, 2) : renderTextResponse(response));
     return;
   }

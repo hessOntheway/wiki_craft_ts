@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { AppConfig, RetrievalMode } from "./types.ts";
 import { loadConfigForKnowledgeBase, listKnowledgeBases, workspacePaths } from "./config.ts";
 import { extractWikilinks, parseVaultFrontmatter } from "./runtime.ts";
-import { ensureDir, listFiles, normalizeWhitespace, pathExists, readJson, relPosix, sha256Hex, truncateChars, writeJson } from "./util.ts";
+import { ensureDir, listFiles, normalizeWhitespace, nowMs, pathExists, readJson, relPosix, sha256Hex, truncateChars, writeJson } from "./util.ts";
 
 interface ChunkGraphEdge {
   subject: string;
@@ -111,9 +111,62 @@ export interface SearchResponse {
   }>;
 }
 
-export async function searchConfigured(configPath: string, knowledgeBaseId: string | undefined, query: string, topK: number, requireExplicitKnowledgeBase = false): Promise<SearchResponse> {
+interface SearchQueryLogEntry {
+  ts_unix_ms: number;
+  ts_iso: string;
+  query: string;
+  top_k: number;
+  retrieval_mode: RetrievalMode;
+  result_count: number;
+  index_status: SearchQueryLogIndexStatus;
+  results: SearchQueryLogResult[];
+}
+
+interface SearchQueryLogIndexStatus {
+  indexed_chunks: number;
+  embedded_chunks?: number;
+  stale_vectors?: number;
+  graph_edges?: number;
+  embedding_signature?: string;
+  warning?: string;
+}
+
+interface SearchQueryLogResult {
+  rank: number;
+  path: string;
+  kind: "index" | "topic" | "source_summary";
+  title?: string;
+  heading?: string;
+  score: number;
+  line_start: number;
+  line_end: number;
+  snippet: string;
+  score_breakdown?: {
+    lexical?: number;
+    vector?: number;
+    graph?: number;
+  };
+  source_urls?: string[];
+  supporting_relations?: SupportingRelation[];
+}
+
+interface SearchQuerySessionLog {
+  schema_version: 1;
+  session_id: string | null;
+  session_missing: boolean;
+  knowledge_base: {
+    id?: string | null;
+    name?: string | null;
+  };
+  latest_log_at_unix_ms: number;
+  latest_log_at_iso: string;
+  entries: SearchQueryLogEntry[];
+}
+
+export async function searchConfigured(configPath: string, knowledgeBaseId: string | undefined, query: string, topK: number, sessionId?: string, requireExplicitKnowledgeBase = false): Promise<SearchResponse> {
   const trimmed = query.trim();
   if (!trimmed) throw new HttpError(400, "search query must not be empty");
+  const trimmedSessionId = sessionId?.trim() || null;
   let kbId = knowledgeBaseId?.trim();
   if (!kbId && requireExplicitKnowledgeBase) throw new HttpError(400, "knowledge_base is required");
   if (!kbId) {
@@ -159,7 +212,7 @@ export async function searchConfigured(configPath: string, knowledgeBaseId: stri
     .filter((hit): hit is { chunk: SearchChunk; score: number } => Boolean(hit.chunk))
     .sort((a, b) => b.score - a.score || kindRank(a.chunk.kind) - kindRank(b.chunk.kind) || a.chunk.id.localeCompare(b.chunk.id))
     .slice(0, Math.min(20, Math.max(1, Math.round(topK || 5))));
-  return {
+  const response: SearchResponse = {
     query: trimmed,
     top_k: Math.min(20, Math.max(1, Math.round(topK || 5))),
     retrieval_mode: retrievalMode,
@@ -191,6 +244,78 @@ export async function searchConfigured(configPath: string, knowledgeBaseId: stri
       supporting_relations: relations.get(chunk.id) ?? [],
     })),
   };
+  const loggedAtMs = nowMs();
+  const entry: SearchQueryLogEntry = {
+    ts_unix_ms: loggedAtMs,
+    ts_iso: new Date(loggedAtMs).toISOString(),
+    query: trimmed,
+    top_k: response.top_k,
+    retrieval_mode: response.retrieval_mode,
+    result_count: response.results.length,
+    index_status: compactIndexStatusForLog(response.index_status),
+    results: compactSearchResultsForLog(response.results),
+  };
+  await appendSearchQueryLog(paths.searchQuerySessionsDir, {
+    sessionId: trimmedSessionId,
+    knowledgeBase: {
+      id: config.knowledge_base?.id ?? kbId,
+      name: config.knowledge_base?.name ?? null,
+    },
+    entry,
+  });
+  return response;
+}
+
+function compactIndexStatusForLog(status: SearchResponse["index_status"]): SearchQueryLogIndexStatus {
+  return {
+    indexed_chunks: status.indexed_chunks,
+    ...(status.embedded_chunks > 0 ? { embedded_chunks: status.embedded_chunks } : {}),
+    ...(status.stale_vectors > 0 ? { stale_vectors: status.stale_vectors } : {}),
+    ...(status.graph_edges > 0 ? { graph_edges: status.graph_edges } : {}),
+    ...(status.embedding_signature ? { embedding_signature: status.embedding_signature } : {}),
+    ...(status.warning ? { warning: status.warning } : {}),
+  };
+}
+
+function compactSearchResultsForLog(results: SearchResponse["results"]): SearchQueryLogResult[] {
+  return results.map((result, index) => ({
+    rank: index + 1,
+    path: result.path,
+    kind: result.kind,
+    ...(result.title ? { title: result.title } : {}),
+    ...(result.heading ? { heading: result.heading } : {}),
+    score: result.score,
+    line_start: result.line_start,
+    line_end: result.line_end,
+    snippet: result.snippet,
+    ...(result.score_breakdown ? { score_breakdown: result.score_breakdown } : {}),
+    ...(result.source_urls.length > 0 ? { source_urls: result.source_urls } : {}),
+    ...(result.supporting_relations?.length ? { supporting_relations: result.supporting_relations } : {}),
+  }));
+}
+
+async function appendSearchQueryLog(dir: string, input: { sessionId: string | null; knowledgeBase: SearchQuerySessionLog["knowledge_base"]; entry: SearchQueryLogEntry }): Promise<void> {
+  try {
+    const file = searchQuerySessionFile(dir, input.sessionId);
+    const existing = await readJson<SearchQuerySessionLog | null>(file, null);
+    await writeJson(file, {
+      schema_version: 1,
+      session_id: input.sessionId,
+      session_missing: !input.sessionId,
+      knowledge_base: input.knowledgeBase,
+      latest_log_at_unix_ms: input.entry.ts_unix_ms,
+      latest_log_at_iso: input.entry.ts_iso,
+      entries: [...(existing?.entries ?? []), input.entry],
+    });
+  } catch {
+    // Search should remain available even when the local query log cannot be written.
+  }
+}
+
+function searchQuerySessionFile(dir: string, sessionId: string | null): string {
+  if (!sessionId) return path.join(dir, "missing-session.json");
+  const slug = sessionId.toLowerCase().replace(/[^a-z0-9_-]+/gu, "-").replace(/^-+|-+$/gu, "").slice(0, 80) || "session";
+  return path.join(dir, `${slug}-${sha256Hex(sessionId).slice(0, 12)}.json`);
 }
 
 export async function reindexConfigured(configPath: string, knowledgeBaseId?: string, lexicalOnly = false): Promise<SearchResponse["index_status"]> {

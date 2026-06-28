@@ -177,6 +177,7 @@ export function workspacePaths(config: AppConfig): WorkspacePaths {
     manifestPath: path.join(approvedEvidence, "sources", "manifest.json"),
     searchIndexPath: path.join(root, "runtime", "search", "index.sqlite"),
     searchCachePath: path.join(root, "runtime", "search", "index.json"),
+    searchQuerySessionsDir: path.join(root, "runtime", "search", "sessions"),
   };
 }
 

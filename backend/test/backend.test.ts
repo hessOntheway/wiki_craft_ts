@@ -16,6 +16,30 @@ async function fixture() {
   return { root, configPath };
 }
 
+async function readQuerySessionLog(kbRoot: string, sessionId: string | null): Promise<{
+  session_id: string | null;
+  session_missing: boolean;
+  knowledge_base: { id: string; name: string };
+  latest_log_at_unix_ms: number;
+  latest_log_at_iso: string;
+  entries: Array<{
+    ts_unix_ms: number;
+    ts_iso: string;
+    query: string;
+    top_k: number;
+    retrieval_mode: string;
+    result_count: number;
+    index_status: Record<string, unknown>;
+    results: Array<{ path: string; snippet: string }>;
+  }>;
+}> {
+  const dir = path.join(kbRoot, "runtime", "search", "sessions");
+  const logs = await Promise.all((await fs.readdir(dir)).map(async (file) => JSON.parse(await fs.readFile(path.join(dir, file), "utf8"))));
+  const log = logs.find((candidate) => candidate.session_id === sessionId);
+  assert.ok(log, `missing query session log for ${sessionId ?? "missing session"}`);
+  return log;
+}
+
 test("knowledge base registry create/list/activate/delete", async () => {
   const { configPath } = await fixture();
   const one = await createKnowledgeBase(configPath, { name: "Agent Memory", focus: "memory design" });
@@ -57,6 +81,14 @@ test("local import writes approved evidence and search sees it", async () => {
   const response = await searchConfigured(configPath, kb.id, "AI review", 5);
   assert.equal(response.results[0].kind, "source_summary");
   assert.match(response.results[0].snippet, /AI review/);
+  const sessionLog = await readQuerySessionLog(kb.root, null);
+  const entry = sessionLog.entries.at(-1);
+  assert.ok(entry);
+  assert.equal(sessionLog.latest_log_at_unix_ms, entry.ts_unix_ms);
+  assert.equal(sessionLog.latest_log_at_iso, entry.ts_iso);
+  assert.equal(sessionLog.session_id, null);
+  assert.equal(sessionLog.session_missing, true);
+  assert.equal(entry.query, "AI review");
 });
 
 test("validated import reports authoring warnings and preserves frontmatter signals", async () => {
@@ -91,7 +123,7 @@ test("search returns bm25 results with clamped top_k", async () => {
   const { configPath } = await fixture();
   const kb = await createKnowledgeBase(configPath, { name: "Searchable", focus: "search" });
   await fs.writeFile(path.join(kb.root, "knowledge", "approved", "topics", "memory.md"), "---\ntitle: \"Memory\"\ntags: [agent]\n---\n\n# Agent Memory\n\nHybrid retrieval and BM25 index design.");
-  const response = await searchConfigured(configPath, kb.id, "BM25 retrieval", 99);
+  const response = await searchConfigured(configPath, kb.id, "BM25 retrieval", 99, "unit-session");
   assert.equal(response.top_k, 20);
   assert.equal(response.retrieval_mode, "bm25");
   assert.equal(response.results[0].kind, "topic");
@@ -99,6 +131,40 @@ test("search returns bm25 results with clamped top_k", async () => {
   assert.ok(await fs.stat(index));
   const status = await reindexConfigured(configPath, kb.id, true);
   assert.equal(status.indexed_chunks, 2);
+
+  const sessionLog = await readQuerySessionLog(kb.root, "unit-session");
+  const entry = sessionLog.entries.at(-1);
+  assert.ok(entry);
+  assert.equal(sessionLog.session_id, "unit-session");
+  assert.equal(sessionLog.session_missing, false);
+  assert.equal(sessionLog.knowledge_base.id, kb.id);
+  assert.equal(sessionLog.knowledge_base.name, "Searchable");
+  assert.equal(sessionLog.latest_log_at_unix_ms, entry.ts_unix_ms);
+  assert.equal(sessionLog.latest_log_at_iso, entry.ts_iso);
+  assert.equal(entry.query, "BM25 retrieval");
+  assert.equal(entry.top_k, 20);
+  assert.equal(entry.retrieval_mode, response.retrieval_mode);
+  assert.equal(entry.result_count, response.results.length);
+  assert.deepEqual(entry.index_status, { indexed_chunks: 2 });
+  assert.match(entry.results[0].path, /memory\.md/);
+  assert.match(entry.results[0].snippet, /BM25 index design/);
+  const loggedEntry = entry as unknown as Record<string, unknown>;
+  assert.equal("schema_version" in loggedEntry, false);
+  assert.equal("kind" in loggedEntry, false);
+  assert.equal("session_id" in loggedEntry, false);
+  assert.equal("session_missing" in loggedEntry, false);
+  assert.equal("knowledge_base" in loggedEntry, false);
+  assert.equal("request" in loggedEntry, false);
+  assert.equal("response" in loggedEntry, false);
+  const loggedResult = entry.results[0] as Record<string, unknown>;
+  assert.equal(loggedResult.rank, 1);
+  assert.equal("aliases" in loggedResult, false);
+  assert.equal("tags" in loggedResult, false);
+  assert.equal("wikilinks" in loggedResult, false);
+  assert.equal("source_ids" in loggedResult, false);
+  assert.equal("source_urls" in loggedResult, false);
+  assert.equal("version_hashes" in loggedResult, false);
+  assert.equal("updated_at_run_id" in loggedResult, false);
 });
 
 test("code-model reindex chunks strict layers and derives graph edges", async () => {
@@ -286,8 +352,16 @@ test("single app routes expose only lightweight API", async () => {
   const health = await routeForTest({ configPath, method: "GET", path: "/api/health" }) as { service: string };
   assert.equal(health.service, "app");
   await assert.rejects(() => routeForTest({ configPath, method: "GET", path: "/api/search?query=test" }), (error: unknown) => (error as { status?: number }).status === 400);
-  const result = await routeForTest({ configPath, method: "GET", path: `/api/search?knowledge_base=${encodeURIComponent(kb.id)}&query=routes` }) as { query: string };
+  const result = await routeForTest({ configPath, method: "GET", path: `/api/search?knowledge_base=${encodeURIComponent(kb.id)}&query=routes&session=http-session` }) as { query: string };
   assert.equal(result.query, "routes");
+  const sessionLog = await readQuerySessionLog(kb.root, "http-session");
+  const entry = sessionLog.entries.at(-1);
+  assert.ok(entry);
+  assert.equal(sessionLog.latest_log_at_unix_ms, entry.ts_unix_ms);
+  assert.equal(sessionLog.latest_log_at_iso, entry.ts_iso);
+  assert.equal(sessionLog.session_id, "http-session");
+  assert.equal(sessionLog.session_missing, false);
+  assert.equal(entry.query, "routes");
   await assert.rejects(() => routeForTest({ configPath, method: "GET", path: `/api/knowledge-bases/${kb.id}/candidates` }), (error: unknown) => (error as { status?: number }).status === 404);
   await assert.rejects(() => routeForTest({ configPath, method: "POST", path: `/api/knowledge-bases/${kb.id}/candidates` }), (error: unknown) => (error as { status?: number }).status === 405);
 });
@@ -331,8 +405,12 @@ Agent Memory stores approved knowledge and retrieves it for AI review.
   assert.match(skill, new RegExp(`--knowledge-base '${kb.id}'`));
   assert.doesNotMatch(skill, /Mandatory Modeling Guide/);
   assert.match(skill, /All search queries must be written in English/);
+  assert.match(skill, /Search Session/);
+  assert.match(skill, /Codex or Claude Code conversation\/thread\/session identifier/);
+  assert.match(skill, /generate a random session ID/);
+  assert.match(skill, /--session "<session-id>"/);
   assert.match(skill, /rewrite the search intent into a concise English query/);
-  assert.match(skill, /Replace `<query>` with a concise English natural-language query/);
+  assert.match(skill, /Replace `<query>` with a concise English natural-language query and `<session-id>`/);
   assert.match(skill, /Project Index/);
   assert.match(skill, /read the project index file directly first, then run search/);
   assert.match(skill, /topics\/code-model\/index\.md/);

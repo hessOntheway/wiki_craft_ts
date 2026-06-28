@@ -45,6 +45,7 @@ export interface WorkspacePaths {
   manifestPath: string;
   searchIndexPath: string;
   searchCachePath: string;
+  searchQuerySessionsDir: string;
 }
 
 export interface AppConfig {

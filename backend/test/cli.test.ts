@@ -52,10 +52,20 @@ test("CLI init, knowledge-base, import, search, reindex, and skill flow", async 
   assert.match(imported.summary_path, /^evidence\/source_summaries\//);
   assert.ok(imported.warnings.some((warning) => warning.includes("missing Summary")));
 
-  const search = parseJson<{ retrieval_mode: string; index_status: { graph_edges: number }; results: Array<{ title: string; score_breakdown?: { graph?: number } }> }>(await runCli(configPath, ["search", "--knowledge-base", kb.id, "--query", "direct local import", "--json"]));
+  const search = parseJson<{ retrieval_mode: string; index_status: { graph_edges: number }; results: Array<{ title: string; score_breakdown?: { graph?: number } }> }>(await runCli(configPath, ["search", "--knowledge-base", kb.id, "--query", "direct local import", "--session", "cli-session", "--json"]));
   assert.equal(search.retrieval_mode, "bm25");
   assert.ok(search.results.length > 0);
   assert.equal(search.index_status.graph_edges, 0);
+  const sessionDir = path.join(kb.root, "runtime", "search", "sessions");
+  const sessionLogs = await Promise.all((await fs.readdir(sessionDir)).map(async (file) => JSON.parse(await fs.readFile(path.join(sessionDir, file), "utf8"))));
+  const sessionLog = sessionLogs.find((candidate) => candidate.session_id === "cli-session") as { session_id?: string; session_missing?: boolean; latest_log_at_unix_ms?: number; entries?: Array<{ ts_unix_ms?: number; query?: string }> } | undefined;
+  assert.ok(sessionLog);
+  const queryLogEntry = sessionLog.entries?.at(-1);
+  assert.ok(queryLogEntry);
+  assert.equal(sessionLog.latest_log_at_unix_ms, queryLogEntry.ts_unix_ms);
+  assert.equal(sessionLog.session_id, "cli-session");
+  assert.equal(sessionLog.session_missing, false);
+  assert.equal(queryLogEntry.query, "direct local import");
 
   const graphText = await runCli(configPath, ["search", "--knowledge-base", kb.id, "--query", "imported"]);
   assert.equal(graphText.code, 0, graphText.stderr);
@@ -70,6 +80,8 @@ test("CLI init, knowledge-base, import, search, reindex, and skill flow", async 
   assert.equal(skill.workflow, "search");
   assert.match(skillBody, /CLI Docs/);
   assert.match(skillBody, /npm run wiki-craft -- --config/);
+  assert.match(skillBody, /Search Session/);
+  assert.match(skillBody, /--session "<session-id>"/);
   assert.doesNotMatch(skillBody, /Mandatory Modeling Guide/);
 
   const authorSkill = parseJson<{ skill_path: string; workflow: string }>(await runCli(configPath, ["skill", "create", "--knowledge-base", kb.id, "--target", "custom", "--destination-path", skillDir, "--workflow", "author"]));
