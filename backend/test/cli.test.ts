@@ -47,6 +47,11 @@ test("CLI init, knowledge-base, search, reindex, and skill flow", async () => {
 
   await fs.writeFile(path.join(kb.root, "knowledge", "source.md"), "# CLI Source\n\nSearch parity and direct knowledge indexing.");
 
+  const reindex = parseJson<{ indexed_chunks: number }>(await runCli(configPath, ["reindex", "--knowledge-base", kb.id, "--lexical-only"]));
+  assert.equal(reindex.indexed_chunks, 2);
+  const events = (await fs.readFile(path.join(kb.root, "runtime", "search", "events.jsonl"), "utf8")).trim().split(/\n/u).map((line) => JSON.parse(line));
+  assert.ok(events.every((event) => event.import_mode === "full" && event.action === "add"));
+
   const search = parseJson<{ retrieval_mode: string; index_status: { graph_edges: number }; results: Array<{ title: string; score_breakdown?: { graph?: number } }> }>(await runCli(configPath, ["search", "--knowledge-base", kb.id, "--query", "direct knowledge indexing", "--session", "cli-session", "--json"]));
   assert.equal(search.retrieval_mode, "bm25");
   assert.ok(search.results.length > 0);
@@ -65,11 +70,6 @@ test("CLI init, knowledge-base, search, reindex, and skill flow", async () => {
   const graphText = await runCli(configPath, ["search", "--knowledge-base", kb.id, "--query", "imported"]);
   assert.equal(graphText.code, 0, graphText.stderr);
   assert.doesNotMatch(graphText.stdout, /related:/);
-
-  const reindex = parseJson<{ indexed_chunks: number }>(await runCli(configPath, ["reindex", "--knowledge-base", kb.id, "--lexical-only"]));
-  assert.equal(reindex.indexed_chunks, 2);
-  const events = (await fs.readFile(path.join(kb.root, "runtime", "search", "events.jsonl"), "utf8")).trim().split(/\n/u).map((line) => JSON.parse(line));
-  assert.ok(events.every((event) => event.import_mode === "full" && event.action === "add"));
 
   const skillDir = path.join(root, "skills");
   const skill = parseJson<{ skill_path: string; workflow: string }>(await runCli(configPath, ["skill", "create", "--knowledge-base", kb.id, "--target", "custom", "--destination-path", skillDir]));

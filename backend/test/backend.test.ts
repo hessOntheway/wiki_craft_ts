@@ -125,14 +125,14 @@ test("search returns bm25 results with clamped top_k", async () => {
   const { configPath } = await fixture();
   const kb = await createKnowledgeBase(configPath, { name: "Searchable", focus: "search" });
   await fs.writeFile(path.join(kb.root, "knowledge", "memory.md"), "---\ntitle: \"Memory\"\ntags: [agent]\n---\n\n# Agent Memory\n\nHybrid retrieval and BM25 index design.");
+  const status = await reindexConfigured(configPath, kb.id, true);
+  assert.equal(status.indexed_chunks, 2);
   const response = await searchConfigured(configPath, kb.id, "BM25 retrieval", 99, "unit-session");
   assert.equal(response.top_k, 20);
   assert.equal(response.retrieval_mode, "bm25");
   assert.equal(response.results[0].kind, "topic");
   const index = path.join(kb.root, "runtime", "search", "index.sqlite");
   assert.ok(await fs.stat(index));
-  const status = await reindexConfigured(configPath, kb.id, true);
-  assert.equal(status.indexed_chunks, 2);
 
   const sessionLog = await readQuerySessionLog(kb.root, "unit-session");
   const entry = sessionLog.entries.at(-1);
@@ -167,6 +167,28 @@ test("search returns bm25 results with clamped top_k", async () => {
   assert.equal("source_urls" in loggedResult, false);
   assert.equal("version_hashes" in loggedResult, false);
   assert.equal("updated_at_run_id" in loggedResult, false);
+});
+
+test("search does not refresh or create an index before reindex", async () => {
+  const { configPath } = await fixture();
+  const kb = await createKnowledgeBase(configPath, { name: "Unindexed", focus: "explicit reindex" });
+  await fs.writeFile(path.join(kb.root, "knowledge", "fresh.md"), "# Fresh Knowledge\n\nThis should not be searchable until reindex runs.");
+
+  const response = await searchConfigured(configPath, kb.id, "Fresh Knowledge", 5, "no-reindex-session");
+  assert.equal(response.retrieval_mode, "bm25");
+  assert.equal(response.index_status.indexed_chunks, 0);
+  assert.equal(response.index_status.embedded_chunks, 0);
+  assert.equal(response.index_status.graph_edges, 0);
+  assert.equal(response.results.length, 0);
+  await assert.rejects(() => fs.stat(path.join(kb.root, "runtime", "search", "index.sqlite")));
+  await assert.rejects(() => fs.stat(path.join(kb.root, "runtime", "search", "events.jsonl")));
+
+  const sessionLog = await readQuerySessionLog(kb.root, "no-reindex-session");
+  const entry = sessionLog.entries.at(-1);
+  assert.ok(entry);
+  assert.equal(entry.query, "Fresh Knowledge");
+  assert.deepEqual(entry.index_status, { indexed_chunks: 0 });
+  assert.equal(entry.result_count, 0);
 });
 
 test("code-model reindex chunks strict layers and derives graph edges", async () => {
@@ -302,6 +324,11 @@ This format guide should not become a search chunk.
   assert.equal(response.retrieval_mode, "bm25");
   assert.ok(response.index_status.graph_edges > 0);
   assert.ok(response.results.every((result) => !result.score_breakdown?.graph));
+  const reindexResponse = await searchConfigured(configPath, kb.id, "reindexConfigured", 5);
+  const reindexResult = reindexResponse.results.find((result) => result.heading === "Exported API > reindexConfigured(configPath, knowledgeBaseId?, lexicalOnly?)");
+  assert.ok(reindexResult);
+  assert.match(reindexResult.snippet, /^### `reindexConfigured/);
+  assert.match(reindexResult.snippet, /Business responsibility: Rebuild indexes/);
 
   const objectGraphResponse = await searchConfigured(configPath, kb.id, "what endpoints use search.searchConfigured", 5);
   assert.equal(objectGraphResponse.retrieval_mode, "graph_hybrid");
@@ -467,6 +494,8 @@ test("search index persists embeddings in sqlite and lexical-only clears them", 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => new Response(JSON.stringify({ embeddings: [[1, 0, 0]] }), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
   try {
+    const status = await reindexConfigured(configPath, kb.id, false);
+    assert.ok(status.embedded_chunks > 0);
     const response = await searchConfigured(configPath, kb.id, "向量数据库", 5);
     assert.ok(response.results.length > 0);
     assert.equal(response.index_status.embedding_signature, "ollama:test-model:3");
@@ -516,6 +545,8 @@ test("openai-compatible embedding provider indexes vectors", async () => {
     return new Response(JSON.stringify({ data: [{ embedding: [1, 0, 0] }] }), { status: 200, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
   try {
+    const status = await reindexConfigured(configPath, kb.id, false);
+    assert.ok(status.embedded_chunks > 0);
     const response = await searchConfigured(configPath, kb.id, "hosted embeddings", 5);
     assert.ok(response.results.length > 0);
     assert.equal(response.index_status.embedding_signature, "openai_compatible:embedding-v1:3");

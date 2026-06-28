@@ -212,8 +212,8 @@ export async function searchConfigured(configPath: string, knowledgeBaseId: stri
 
   const config = await loadConfigForKnowledgeBase(configPath, kbId);
   const paths = workspacePaths(config);
-  const chunks = await collectChunks(paths.knowledgeCurrent);
-  const cache = await refreshIndex(paths, chunks, config.search, false, false);
+  const chunks = sqliteIndexedChunks(paths.searchIndexPath);
+  const cache = sqliteIndexCache(paths.searchIndexPath, config.search);
   const retrievalLimit = Math.max(20, Math.min(100, Math.round(topK || 5) * 4));
   const lexical = sqliteBm25(paths.searchIndexPath, trimmed, retrievalLimit)
     .then((hits) => hits.length > 0 ? hits : bm25(chunks, trimmed))
@@ -834,17 +834,26 @@ function deleteChunkIndexes(db: DatabaseSync, chunkId: string): void {
 function addChunkIndexes(db: DatabaseSync, chunk: SearchChunk): void {
   const contentHash = sha256Hex(chunk.body);
   db.prepare(`INSERT INTO search_chunks (
-    chunk_id, content_hash, title, aliases, tags, wikilinks, heading, body, embeddable_text,
+    chunk_id, content_hash, display_path, relative_path, kind, title, aliases, tags, wikilinks,
+    source_ids, source_urls, version_hashes, updated_at_run_id, heading, body, line_start, embeddable_text,
     embedding, embedding_signature, embedding_error
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`).run(
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`).run(
     chunk.id,
     contentHash,
+    chunk.displayPath,
+    chunk.relativePath,
+    chunk.kind,
     chunk.title ?? "",
     chunk.aliases.join(" "),
     chunk.tags.join(" "),
     chunk.wikilinks.join(" "),
+    JSON.stringify(chunk.source_ids),
+    JSON.stringify(chunk.source_urls),
+    JSON.stringify(chunk.version_hashes),
+    chunk.updated_at_run_id ?? null,
     chunk.heading ?? "",
     chunk.body,
+    chunk.lineStart,
     embeddableText(chunk),
   );
   insertGraphEdgesForChunk(db, chunk, contentHash);
@@ -880,12 +889,20 @@ function ensureSearchSchema(db: DatabaseSync): void {
 CREATE TABLE IF NOT EXISTS search_chunks (
   chunk_id TEXT PRIMARY KEY,
   content_hash TEXT NOT NULL,
+  display_path TEXT NOT NULL DEFAULT '',
+  relative_path TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'topic',
   title TEXT NOT NULL,
   aliases TEXT NOT NULL,
   tags TEXT NOT NULL,
   wikilinks TEXT NOT NULL,
+  source_ids TEXT NOT NULL DEFAULT '[]',
+  source_urls TEXT NOT NULL DEFAULT '[]',
+  version_hashes TEXT NOT NULL DEFAULT '[]',
+  updated_at_run_id TEXT,
   heading TEXT NOT NULL,
   body TEXT NOT NULL,
+  line_start INTEGER NOT NULL DEFAULT 1,
   embeddable_text TEXT NOT NULL,
   embedding BLOB,
   embedding_signature TEXT,
@@ -914,7 +931,26 @@ CREATE INDEX IF NOT EXISTS idx_search_graph_predicate ON search_graph_edges(pred
   if (!columns.has("embedding") || !columns.has("embedding_signature") || !columns.has("embedding_error")) {
     db.exec("DROP TABLE IF EXISTS search_chunks_fts; DROP TABLE IF EXISTS search_chunks; DROP TABLE IF EXISTS search_meta;");
     ensureSearchSchema(db);
+    return;
   }
+  const addedMetadataColumn = [
+    addSearchChunkColumn(db, columns, "display_path", "TEXT NOT NULL DEFAULT ''"),
+    addSearchChunkColumn(db, columns, "relative_path", "TEXT NOT NULL DEFAULT ''"),
+    addSearchChunkColumn(db, columns, "kind", "TEXT NOT NULL DEFAULT 'topic'"),
+    addSearchChunkColumn(db, columns, "source_ids", "TEXT NOT NULL DEFAULT '[]'"),
+    addSearchChunkColumn(db, columns, "source_urls", "TEXT NOT NULL DEFAULT '[]'"),
+    addSearchChunkColumn(db, columns, "version_hashes", "TEXT NOT NULL DEFAULT '[]'"),
+    addSearchChunkColumn(db, columns, "updated_at_run_id", "TEXT"),
+    addSearchChunkColumn(db, columns, "line_start", "INTEGER NOT NULL DEFAULT 1"),
+  ].some(Boolean);
+  if (addedMetadataColumn) db.prepare("UPDATE search_chunks SET content_hash = ''").run();
+}
+
+function addSearchChunkColumn(db: DatabaseSync, columns: Set<string>, name: string, definition: string): boolean {
+  if (columns.has(name)) return false;
+  db.exec(`ALTER TABLE search_chunks ADD COLUMN ${name} ${definition}`);
+  columns.add(name);
+  return true;
 }
 
 function rebuildGraphIndex(db: DatabaseSync, chunks: SearchChunk[]): void {
@@ -983,9 +1019,9 @@ function graphEdgeId(edge: GraphEdge): string {
 async function sqliteGraphHits(sqlitePath: string, query: string, limit: number): Promise<GraphHit[]> {
   const plan = graphQueryPlan(query);
   if (!plan) return [];
+  if (!fssync.existsSync(sqlitePath)) return [];
   const db = new DatabaseSync(sqlitePath);
   try {
-    ensureSearchSchema(db);
     const rows = db.prepare(`SELECT chunk_id, subject, predicate, object, subject_norm, predicate_norm, object_norm, evidence_count
       FROM search_graph_edges
       ORDER BY chunk_id, predicate, subject, object
@@ -1121,6 +1157,18 @@ function sqliteGraphEdgeCount(sqlitePath: string): number {
   }
 }
 
+function sqliteGraphEdgeCountIfExists(sqlitePath: string): number {
+  if (!fssync.existsSync(sqlitePath)) return 0;
+  const db = new DatabaseSync(sqlitePath);
+  try {
+    return graphEdgeCount(db);
+  } catch {
+    return 0;
+  } finally {
+    db.close();
+  }
+}
+
 function rebuildFtsIndex(db: DatabaseSync): void {
   try {
     db.exec(`DROP TABLE IF EXISTS search_chunks_fts;
@@ -1143,6 +1191,89 @@ INSERT INTO search_chunks_fts(rowid, title, aliases, tags, wikilinks, heading, b
   }
 }
 
+function sqliteIndexedChunks(sqlitePath: string): SearchChunk[] {
+  if (!fssync.existsSync(sqlitePath)) return [];
+  const db = new DatabaseSync(sqlitePath);
+  try {
+    const rows = db.prepare("SELECT * FROM search_chunks ORDER BY chunk_id").all() as Array<{
+      chunk_id: string;
+      display_path?: string | null;
+      relative_path?: string | null;
+      kind?: string | null;
+      title?: string | null;
+      aliases?: string | null;
+      tags?: string | null;
+      wikilinks?: string | null;
+      source_ids?: string | null;
+      source_urls?: string | null;
+      version_hashes?: string | null;
+      updated_at_run_id?: string | null;
+      heading?: string | null;
+      body?: string | null;
+      line_start?: number | null;
+    }>;
+    return rows.map((row) => {
+      const displayPath = row.display_path?.trim() || pathFromChunkId(row.chunk_id);
+      return {
+        id: row.chunk_id,
+        displayPath,
+        relativePath: row.relative_path?.trim() || displayPath,
+        kind: row.kind === "index" ? "index" : "topic",
+        title: row.title || null,
+        heading: row.heading || null,
+        body: row.body ?? "",
+        lineStart: Math.max(1, Number(row.line_start) || 1),
+        aliases: splitStoredList(row.aliases),
+        tags: splitStoredList(row.tags),
+        wikilinks: splitStoredList(row.wikilinks),
+        source_ids: parseStoredJsonList(row.source_ids),
+        source_urls: parseStoredJsonList(row.source_urls),
+        version_hashes: parseStoredJsonList(row.version_hashes),
+        updated_at_run_id: row.updated_at_run_id || null,
+        graph_edges: [],
+      };
+    });
+  } catch {
+    return [];
+  } finally {
+    db.close();
+  }
+}
+
+function sqliteIndexCache(sqlitePath: string, settings: AppConfig["search"]): SearchIndexCache {
+  const signature = embeddingsEnabled(settings) ? embeddingSignature(settings) : null;
+  const rows = sqliteIndexRows(sqlitePath, settings.embedding_dimensions, signature);
+  return {
+    schema_version: 1,
+    fingerprint: "",
+    chunks: rows.map((row) => ({ id: row.chunk_id, hash: row.content_hash, embedding: row.embedding ?? undefined })),
+    embedding_signature: signature,
+    embedding_warning: rows.find((row) => row.embedding_error)?.embedding_error ?? null,
+    stale_vectors: rows.filter((row) => row.embedding_signature && row.embedding_signature !== signature).length,
+    graph_edges: sqliteGraphEdgeCountIfExists(sqlitePath),
+  };
+}
+
+function pathFromChunkId(chunkId: string): string {
+  const separator = chunkId.lastIndexOf("#");
+  return separator > 0 ? chunkId.slice(0, separator) : chunkId;
+}
+
+function splitStoredList(value?: string | null): string[] {
+  return (value ?? "").split(/\s+/u).map((item) => item.trim()).filter(Boolean);
+}
+
+function parseStoredJsonList(value?: string | null): string[] {
+  const trimmed = value?.trim();
+  if (!trimmed) return [];
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+  } catch {
+    return splitStoredList(trimmed);
+  }
+}
+
 async function vectorHits(query: string, cache: SearchIndexCache, settings: AppConfig["search"]): Promise<Array<{ id: string; score: number }>> {
   const queryEmbedding = await embed(query, settings);
   return cache.chunks.filter((chunk) => chunk.embedding).map((chunk) => ({
@@ -1154,6 +1285,7 @@ async function vectorHits(query: string, cache: SearchIndexCache, settings: AppC
 async function sqliteBm25(sqlitePath: string, query: string, limit: number): Promise<Array<{ id: string; score: number }>> {
   const expression = ftsExpression(query);
   if (!expression) return [];
+  if (!fssync.existsSync(sqlitePath)) return [];
   const db = new DatabaseSync(sqlitePath);
   try {
     const rows = db.prepare(`SELECT sc.chunk_id AS id, -bm25(search_chunks_fts, 10.0, 8.0, 6.0, 4.0, 7.0, 1.0) AS score
@@ -1206,6 +1338,7 @@ function clearSqliteEmbeddings(sqlitePath: string): void {
 }
 
 function sqliteIndexRows(sqlitePath: string, dimensions: number, signature: string | null): Array<{ chunk_id: string; content_hash: string; embedding?: number[] | null; embedding_signature?: string | null; embedding_error?: string | null }> {
+  if (!fssync.existsSync(sqlitePath)) return [];
   const db = new DatabaseSync(sqlitePath);
   try {
     const rows = db.prepare("SELECT chunk_id, content_hash, embedding, embedding_signature, embedding_error FROM search_chunks ORDER BY chunk_id").all() as Array<{ chunk_id: string; content_hash: string; embedding?: Buffer | null; embedding_signature?: string | null; embedding_error?: string | null }>;
@@ -1214,6 +1347,8 @@ function sqliteIndexRows(sqlitePath: string, dimensions: number, signature: stri
       const valid = embedding && (!dimensions || embedding.length === dimensions) && (!signature || row.embedding_signature === signature);
       return { chunk_id: row.chunk_id, content_hash: row.content_hash, embedding: valid ? embedding : null, embedding_signature: row.embedding_signature ?? null, embedding_error: valid ? row.embedding_error ?? null : row.embedding ? "invalid search embedding blob" : row.embedding_error ?? null };
     });
+  } catch {
+    return [];
   } finally {
     db.close();
   }
@@ -1322,11 +1457,16 @@ function normalizeGraphText(text: string): string {
 }
 
 function snippet(body: string, query: string): string {
+  const max = 1200;
+  const trimmed = body.trim();
+  if (trimmed.length <= max) return trimmed;
   const lower = body.toLowerCase();
   const firstTerm = termsFor(query)[0] ?? "";
   const index = firstTerm ? lower.indexOf(firstTerm.toLowerCase()) : -1;
-  const start = Math.max(0, index - 240);
-  return truncateChars(body.slice(start).trim(), 1200);
+  const windowStart = Math.max(0, index - 240);
+  const lineStart = body.lastIndexOf("\n", windowStart);
+  const start = lineStart >= 0 ? lineStart + 1 : 0;
+  return truncateChars(body.slice(start).trim(), max);
 }
 
 function kindRank(kind: SearchChunk["kind"]): number {
