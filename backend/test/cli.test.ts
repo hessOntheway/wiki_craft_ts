@@ -70,14 +70,16 @@ test("CLI init, knowledge-base, import, search, reindex, and skill flow", async 
   assert.equal(skill.workflow, "search");
   assert.match(skillBody, /CLI Docs/);
   assert.match(skillBody, /npm run wiki-craft -- --config/);
+  assert.doesNotMatch(skillBody, /Mandatory Modeling Guide/);
 
   const authorSkill = parseJson<{ skill_path: string; workflow: string }>(await runCli(configPath, ["skill", "create", "--knowledge-base", kb.id, "--target", "custom", "--destination-path", skillDir, "--workflow", "author"]));
   const authorBody = await fs.readFile(path.join(authorSkill.skill_path, "SKILL.md"), "utf8");
   assert.equal(authorSkill.workflow, "author");
-  assert.match(authorBody, /Authoring Contract/);
+  assert.match(authorBody, /Mandatory Modeling Guide/);
   assert.match(authorBody, /docs\/code-model\/modeling-guide\.md/);
-  assert.match(authorBody, /Calls L3/);
-  assert.match(authorBody, /Forbidden Sections/);
+  assert.match(authorBody, /If that guide is unavailable, do not use this skill/);
+  assert.doesNotMatch(authorBody, /L2 Interface Page Format/);
+  assert.doesNotMatch(authorBody, /Fallback/);
 
   const removed = await runCli(configPath, ["candidates", "list"]);
   assert.notEqual(removed.code, 0);

@@ -260,7 +260,7 @@ async function readDocument(file: string, knowledgeRoot: string, kind: SearchChu
   const parsed = parseVaultFrontmatter(raw);
   const root = alternateRoot ?? knowledgeRoot;
   const relativePath = relPosix(root, file);
-  if (!alternateRoot && relativePath === "topics/code-model/modeling-guide.md") return [];
+  if (!alternateRoot && codeModelFileExcludedFromSearch(relativePath)) return [];
   const displayPath = alternateRoot ? `evidence/source_summaries/${relativePath}` : relativePath;
   const title = parsed.title ?? h1Title(parsed.body);
   const sections = codeModelSections(relativePath, parsed.body) ?? splitSections(parsed.body);
@@ -313,6 +313,10 @@ function codeModelSections(relativePath: string, body: string): Array<{ heading?
   if (basename.startsWith("l2-")) return l2CodeModelSections(body);
   if (basename.startsWith("l3-")) return l3CodeModelSections(body);
   return null;
+}
+
+function codeModelFileExcludedFromSearch(relativePath: string): boolean {
+  return relativePath === "topics/code-model/modeling-guide.md" || relativePath === "topics/code-model/index.md";
 }
 
 function h1Title(body: string): string | undefined {

@@ -106,6 +106,12 @@ test("code-model reindex chunks strict layers and derives graph edges", async ()
   const kb = await createKnowledgeBase(configPath, { name: "Graphable", focus: "graph search" });
   const codeModel = path.join(kb.root, "knowledge", "approved", "topics", "code-model");
   await fs.mkdir(codeModel, { recursive: true });
+  await fs.writeFile(path.join(codeModel, "index.md"), `# Backend Project Index
+
+## Summary
+
+PROJECT_INDEX_ONLY This project index should be read directly for orientation and should not become a search chunk.
+`);
   await fs.writeFile(path.join(codeModel, "l1-backend-repo.md"), `# Backend Repository Model
 
 ## Summary
@@ -220,7 +226,7 @@ This format guide should not become a search chunk.
     assert.ok(codeChunks.some((chunk) => chunk.heading === "Approved Search"));
     assert.ok(codeChunks.some((chunk) => chunk.heading === "Endpoints > GET /api/search"));
     assert.ok(codeChunks.some((chunk) => chunk.heading === "Exported API > searchConfigured(configPath, knowledgeBaseId, query, topK, requireExplicitKnowledgeBase?)"));
-    const projectIndex = db.prepare("SELECT COUNT(*) AS count FROM search_chunks WHERE body LIKE '%PROJECT_OVERVIEW_ONLY%' OR chunk_id = 'topics/code-model/modeling-guide.md#0'").get() as { count: number };
+    const projectIndex = db.prepare("SELECT COUNT(*) AS count FROM search_chunks WHERE body LIKE '%PROJECT_OVERVIEW_ONLY%' OR body LIKE '%PROJECT_INDEX_ONLY%' OR chunk_id IN ('topics/code-model/modeling-guide.md#0', 'topics/code-model/index.md#0')").get() as { count: number };
     assert.equal(projectIndex.count, 0);
     const l1 = db.prepare("SELECT COUNT(*) AS count FROM search_graph_edges WHERE predicate = 'drills_down_to_l2'").get() as { count: number };
     assert.equal(l1.count, 2);
@@ -251,6 +257,12 @@ test("skill generation uses fixed CLI search command", async () => {
   await fs.writeFile(path.join(kb.root, "knowledge", "approved", "topics", "retrieval.md"), "---\ntitle: \"Retrieval Patterns\"\naliases: [lookup]\ntags: [memory]\n---\n\n# Retrieval Patterns\n");
   const codeModel = path.join(kb.root, "knowledge", "approved", "topics", "code-model");
   await fs.mkdir(codeModel, { recursive: true });
+  await fs.writeFile(path.join(codeModel, "index.md"), `# Agent Memory
+
+## Summary
+
+Agent Memory stores approved knowledge and retrieves it for AI review.
+`);
   await fs.writeFile(path.join(codeModel, "l1-agent-memory.md"), `# Agent Memory Code Model
 
 ## Summary
@@ -273,8 +285,13 @@ Agent Memory stores approved knowledge and retrieves it for AI review.
   assert.match(skill, /Retrieval Patterns/);
   assert.match(skill, /npm run wiki-craft -- --config/);
   assert.match(skill, new RegExp(`--knowledge-base '${kb.id}'`));
+  assert.doesNotMatch(skill, /Mandatory Modeling Guide/);
   assert.match(skill, /Project Index/);
-  assert.match(skill, /Agent Memory stores approved knowledge/);
+  assert.match(skill, /read the project index file directly first, then run search/);
+  assert.match(skill, /topics\/code-model\/index\.md/);
+  assert.match(skill, /Project index status: available/);
+  assert.doesNotMatch(skill, /Agent Memory stores approved knowledge and retrieves it for AI review/);
+  assert.match(skill, /project index -> L1 capability -> L2 interface -> L3 exported API/);
   assert.match(skill, /Drill down to L2/);
   assert.match(skill, /Calls L3/);
   assert.match(skill, /only recognizes English graph-intent words/);
@@ -288,7 +305,7 @@ Agent Memory stores approved knowledge and retrieves it for AI review.
   await assert.rejects(() => createSkill(configPath, kb.id, "custom"), /destination_path is required/);
 });
 
-test("author skill generation writes code analysis authoring contract", async () => {
+test("author skill generation requires repository modeling guide", async () => {
   const { root, configPath } = await fixture();
   const kb = await createKnowledgeBase(configPath, { name: "Review Knowledge", focus: "AI review business context" });
   const destination = path.join(root, "skills");
@@ -296,12 +313,14 @@ test("author skill generation writes code analysis authoring contract", async ()
   const skill = await fs.readFile(path.join(outcome.skill_path, "SKILL.md"), "utf8");
   assert.equal(outcome.skill_name, "wiki-craft-review-knowledge-author");
   assert.equal(outcome.workflow, "author");
-  assert.match(skill, /Authoring Contract/);
+  assert.match(skill, /Mandatory Modeling Guide/);
   assert.match(skill, /docs\/code-model\/modeling-guide\.md/);
-  assert.match(skill, /must follow that guide exactly/);
-  assert.match(skill, /L2 Interface Page Format/);
-  assert.match(skill, /Calls L3/);
-  assert.match(skill, /Forbidden Sections/);
+  assert.match(skill, /If that guide is unavailable, do not use this skill/);
+  assert.doesNotMatch(skill, /mandatory fallback contract/i);
+  assert.doesNotMatch(skill, /Authoring Contract/);
+  assert.doesNotMatch(skill, /L2 Interface Page Format/);
+  assert.doesNotMatch(skill, /Calls L3/);
+  assert.doesNotMatch(skill, /Forbidden Sections/);
   assert.doesNotMatch(skill, /Code\/Workflow Map/);
   assert.doesNotMatch(skill, /Review Guidance/);
   assert.match(skill, /import-local --knowledge-base/);
