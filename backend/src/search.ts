@@ -647,8 +647,9 @@ async function refreshIndex(
   let warning: string | null = null;
   if (enabled && !lexicalOnly) {
     const changedIds = new Set(events.filter((event) => event.action === "add" || event.action === "update").map((event) => event.chunk_id));
-    for (const chunk of chunks.filter((item) => changedIds.has(item.id))) {
+    for (const chunk of chunks) {
       const state = sqliteEmbeddingState(paths.searchIndexPath, chunk.id);
+      if (!changedIds.has(chunk.id) && state.embedding_signature === signature && state.embedding) continue;
       if (state.embedding && state.embedding_signature === signature) continue;
       try {
         persistSqliteEmbedding(paths.searchIndexPath, chunk.id, await embed(embeddableText(chunk), settings), signature!);

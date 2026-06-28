@@ -482,6 +482,13 @@ test("search index persists embeddings in sqlite and lexical-only clears them", 
   }
   const lexical = await reindexConfigured(configPath, kb.id, true);
   assert.equal(lexical.embedded_chunks, 0);
+  globalThis.fetch = (async () => new Response(JSON.stringify({ embeddings: [[1, 0, 0]] }), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
+  try {
+    const restored = await reindexConfigured(configPath, kb.id, false);
+    assert.ok(restored.embedded_chunks > 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("embedding provider defaults to none without requiring a local service", async () => {
